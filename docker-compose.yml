@@ -1,0 +1,16 @@
+# 可选：Postgres for 生产/集成。本地默认用 SQLite（零依赖，无需 docker）。
+# 用法：docker compose up -d postgres，然后设 KEEPLIX_DATABASE_URL 见 backend/.env.example
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: keeplix
+      POSTGRES_PASSWORD: keeplix
+      POSTGRES_DB: keeplix
+    ports:
+      - "5432:5432"
+    volumes:
+      - keeplix_pgdata:/var/lib/postgresql/data
+
+volumes:
+  keeplix_pgdata:

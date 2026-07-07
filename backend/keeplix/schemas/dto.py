@@ -1,0 +1,79 @@
+"""请求/响应 DTO。"""
+
+from __future__ import annotations
+
+from pydantic import BaseModel, Field
+
+
+# --------------------------------------------------------------------------- #
+# 分析
+# --------------------------------------------------------------------------- #
+class AnalysisRequest(BaseModel):
+    url: str
+    engine_id: str | None = Field(
+        default=None, description="按引擎档评分；null=通用档"
+    )
+    brand_name: str | None = None
+    preferred_sources: list[str] | None = None
+    project_id: str | None = None
+
+
+class RecommendationDTO(BaseModel):
+    dimension: str
+    title: str
+    detail: str
+    severity: str
+    jsonld: dict | None = None
+    compliance_flag: bool = False
+
+
+class AnalysisResponse(BaseModel):
+    audit_run_id: str
+    url: str
+    status: int
+    total: int = Field(description="GEO 总分 0–100")
+    breakdown: dict
+    recommendations: list[RecommendationDTO]
+
+
+# --------------------------------------------------------------------------- #
+# Citation 采样
+# --------------------------------------------------------------------------- #
+class CitationRunRequest(BaseModel):
+    engine_ids: list[str]
+    prompts: list[str]
+    brand_name: str
+    aliases: list[str] | None = None
+    brand_domains: list[str] | None = None
+    samples: int | None = Field(default=None, description="每 prompt 采样次数；null=用默认")
+    project_id: str | None = None
+
+
+class SoVEngineResult(BaseModel):
+    engine_id: str
+    entity_sov: float
+    citation_sov: float
+    avg_rank: float | None
+    sample_size: int
+
+
+class CitationRunResponse(BaseModel):
+    results: list[SoVEngineResult]
+
+
+# --------------------------------------------------------------------------- #
+# 项目
+# --------------------------------------------------------------------------- #
+class ProjectCreate(BaseModel):
+    name: str
+    primary_domain: str = ""
+    client_name: str = "default"
+    locale: str = "zh-CN"
+
+
+class ProjectResponse(BaseModel):
+    id: str
+    name: str
+    primary_domain: str
+    locale: str
+    status: str

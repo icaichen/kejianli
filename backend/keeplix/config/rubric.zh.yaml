@@ -1,0 +1,69 @@
+# GEO 评分 rubric（可配置 IP）。改评分 = 改这里，不改代码。见 docs/geo-rubric.md。
+# 未实现的 check：scoring 记 0 分 + evidence=not_implemented，不崩。
+version: 1
+locale: zh-CN
+
+dimensions:
+  technical_crawlability:
+    weight: 15
+    checks:
+      - { id: http_ok, method: rule, weight: 5 }
+      - { id: ssr_content_visible, method: rule, weight: 6 }
+      - { id: has_title, method: rule, weight: 4 }
+
+  content_structure:
+    weight: 20
+    checks:
+      - { id: direct_answer_lead, method: rule, weight: 6 }
+      - { id: heading_hierarchy, method: rule, weight: 5 }
+      - { id: qa_or_list_format, method: rule, weight: 5 }
+      - { id: paragraph_length, method: rule, weight: 4 }
+
+  authority_eeat:
+    weight: 20
+    checks:
+      - { id: has_author, method: rule, weight: 7 }
+      - { id: has_outbound_citations, method: rule, weight: 7 }
+      - { id: llm_authority_tone, method: llm, weight: 6 }   # 留位，未实现→0
+
+  freshness:
+    weight: 10
+    checks:
+      - { id: has_date, method: rule, weight: 6 }
+      - { id: recent_signal, method: rule, weight: 4 }
+
+  citation_friendliness:
+    weight: 15
+    checks:
+      - { id: extractable_facts, method: rule, weight: 5 }
+      - { id: data_expression, method: rule, weight: 5 }
+      - { id: llm_faq_coverage, method: llm, weight: 5 }     # 留位
+
+  entity_alignment:
+    weight: 10
+    checks:
+      - { id: has_jsonld, method: rule, weight: 6 }
+      - { id: entity_named, method: rule, weight: 4 }
+
+  walled_garden_presence:
+    weight: 10
+    checks:
+      - { id: links_to_preferred_sources, method: rule, weight: 10 }
+
+# 按引擎覆盖某维度总权重（scoring 会重新归一化到 100）
+engine_overrides:
+  baidu_ernie:
+    walled_garden_presence: { weight: 18 }
+    entity_alignment: { weight: 14 }
+  kimi:
+    authority_eeat: { weight: 26 }
+    walled_garden_presence: { weight: 4 }
+  doubao:
+    walled_garden_presence: { weight: 16 }
+
+# 合规红线：命中 → compliance_flag，且相关建议置顶
+compliance:
+  forbidden_patterns:
+    - keyword_stuffing
+    - fake_reviews
+    - guaranteed_ranking_claim

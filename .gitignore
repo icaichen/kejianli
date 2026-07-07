@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+*.db
+*.sqlite*
+*.egg-info/
+build/
+dist/
+
+# Node
+node_modules/
+.next/
+out/
+frontend/.env*.local
+
+# 环境与本地
+.env
+.env.local
+.DS_Store
+
+# 编辑器
+.vscode/
+.idea/
