@@ -83,7 +83,11 @@ async def run_sampling(
     for prompt in prompts:
         for i in range(samples):
             resp = await provider.query(prompt)
+            # 优先用结构化 citations；若无则从文本提取 URL（fallback for DeepSeek 等）
             urls = [c.url for c in resp.cited_sources]
+            if not urls:
+                import re
+                urls = re.findall(r'https?://[^\s\)）]+', resp.answer_text)
             parsed.append(
                 parse_response(
                     prompt, i, resp.answer_text, urls,

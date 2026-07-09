@@ -34,7 +34,10 @@ async def run_analysis(req: AnalysisRequest, session: Session) -> AnalysisRespon
         "recommendation",
         RecommendationAgent(),
         RecommendationInput(
-            url=req.url, breakdown=analysis_out.breakdown, brand_name=req.brand_name
+            url=req.url,
+            breakdown=analysis_out.breakdown,
+            brand_name=req.brand_name,
+            first_paragraph=analysis_out.signals.get("first_paragraph"),
         ),
     )
 
@@ -75,9 +78,13 @@ async def run_analysis(req: AnalysisRequest, session: Session) -> AnalysisRespon
         )
         rec_dtos.append(
             RecommendationDTO(
-                dimension=item.dimension, title=item.title, detail=item.detail,
-                severity=item.severity, jsonld=item.jsonld,
+                dimension=item.dimension,
+                title=item.title,
+                detail=item.detail,
+                severity=item.severity,
+                jsonld=item.jsonld,
                 compliance_flag=item.compliance_flag,
+                generated_content=item.generated_content,
             )
         )
 

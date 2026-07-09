@@ -7,7 +7,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import httpx
+
 from keeplix.agents.base import Agent
+from keeplix.core.config import get_settings
 
 # check_id → (维度, 建议标题, 详情, 严重度)
 _ADVICE: dict[str, tuple[str, str, str, str]] = {
@@ -55,6 +58,7 @@ class RecommendationItem:
     severity: str
     jsonld: dict | None = None
     compliance_flag: bool = False
+    generated_content: str | None = None  # 新增：LLM 生成的现成内容（可直接用）
 
 
 @dataclass
@@ -62,6 +66,7 @@ class RecommendationInput:
     url: str
     breakdown: dict
     brand_name: str | None = None
+    first_paragraph: str | None = None  # 新增：用于生成首段直答
 
 
 @dataclass
@@ -76,6 +81,80 @@ def _org_jsonld(brand_name: str, url: str) -> dict:
         "name": brand_name,
         "url": url,
     }
+
+
+# 可以用 LLM 生成内容的 check（内容类建议）
+_CONTENT_GENERATABLE = {
+    "direct_answer_lead",      # 生成首段直答
+    "faq_coverage",             # 生成 FAQ
+    "has_author",               # 生成作者 bio
+}
+
+
+async def _generate_content(
+    check_id: str, url: str, brand_name: str, first_para: str
+) -> str | None:
+    """用 LLM 为内容类建议生成现成可用的文本（客户可直接复制粘贴）。"""
+    if check_id not in _CONTENT_GENERATABLE:
+        return None
+
+    settings = get_settings()
+    if not settings.deepseek_api_key:
+        return None  # 无 key 时不生成
+
+    prompts = {
+        "direct_answer_lead": f"""你是 GEO 优化专家。请为网站 {url}（品牌：{brand_name}）生成一段 40-200 字的"首段直答"。
+要求：
+- 开门见山回答用户核心问题（"这是什么？""能帮我什么？"）
+- 语气专业、简洁，适合被 AI 引用
+- 不要废话，不要营销腔
+
+当前首段：{first_para or '（无）'}
+
+请直接输出优化后的首段，不要加解释。""",
+        "faq_coverage": f"""你是 GEO 优化专家。请为网站 {url}（品牌：{brand_name}）生成 3-5 个常见问题（FAQ）。
+要求：
+- 问题要具体、用户会真实搜索
+- 答案要直接、40-80 字
+- 适合做成结构化 FAQPage
+
+格式：
+Q: 问题1
+A: 答案1
+
+Q: 问题2
+A: 答案2
+
+请直接输出，不要加解释。""",
+        "has_author": f"""你是 GEO 优化专家。请为网站 {url}（品牌：{brand_name}）生成一段作者介绍（author bio）。
+要求：
+- 50-100 字
+- 突出专业资质、经验
+- 增强 E-E-A-T 权威信号
+
+请直接输出作者介绍，不要加解释。""",
+    }
+
+    prompt = prompts.get(check_id)
+    if not prompt:
+        return None
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{settings.deepseek_base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {settings.deepseek_api_key}"},
+                json={
+                    "model": "deepseek-chat",
+                    "messages": [{"role": "user", "content": prompt.strip()}],
+                    "temperature": 0.7,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data["choices"][0]["message"]["content"].strip()
+    except Exception:
+        return None  # 生成失败时静默返回 None（不影响主流程）
 
 
 class RecommendationAgent(Agent[RecommendationInput, RecommendationOutput]):
@@ -94,10 +173,25 @@ class RecommendationAgent(Agent[RecommendationInput, RecommendationOutput]):
                 jsonld = None
                 if check["id"] == "has_jsonld" and payload.brand_name:
                     jsonld = _org_jsonld(payload.brand_name, payload.url)
+
+                # 内容生成：为内容类建议生成现成可用的文本
+                generated = None
+                if check["id"] in _CONTENT_GENERATABLE and payload.brand_name:
+                    generated = await _generate_content(
+                        check["id"],
+                        payload.url,
+                        payload.brand_name,
+                        payload.first_paragraph or "",
+                    )
+
                 items.append(
                     RecommendationItem(
-                        dimension=dimension, title=title, detail=detail,
-                        severity=severity, jsonld=jsonld,
+                        dimension=dimension,
+                        title=title,
+                        detail=detail,
+                        severity=severity,
+                        jsonld=jsonld,
+                        generated_content=generated,
                     )
                 )
 

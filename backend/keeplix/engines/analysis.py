@@ -76,7 +76,7 @@ def parse(fetch_result: FetchResult, preferred_sources: list[str] | None = None)
     paragraphs = [p.get_text(strip=True) for p in soup.find_all("p")]
     paragraphs = [p for p in paragraphs if p]
     headings = {f"h{i}": len(soup.find_all(f"h{i}")) for i in range(1, 5)}
-    links = [a.get("href", "") for a in soup.find_all("a", href=True)]
+    links = [str(a.get("href", "")) for a in soup.find_all("a", href=True)]
     external_links = [h for h in links if h.startswith("http")]
 
     first_para = paragraphs[0] if paragraphs else ""

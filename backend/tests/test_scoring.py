@@ -49,8 +49,19 @@ def test_engine_override_changes_weight():
     assert ernie["walled_garden_presence"]["weight"] > base["walled_garden_presence"]["weight"]
 
 
-def test_not_implemented_check_does_not_crash():
-    # llm_* 是留位 check，应记 0 且 evidence=not_implemented
+def test_llm_check_is_judged_not_dropped():
+    # llm_* 项现由 llm_judge 评估：无 key 时走确定性 heuristic，evidence=llm_stub
     breakdown = scoring.score(_RICH_SIGNALS)["breakdown"]
     eeat_checks = {c["id"]: c for c in breakdown["authority_eeat"]["checks"]}
-    assert eeat_checks["llm_authority_tone"]["evidence"] == "not_implemented"
+    tone = eeat_checks["llm_authority_tone"]
+    assert tone["evidence"] in ("llm", "llm_stub")
+    assert tone["got"] > 0  # 富信号（有作者+外链）应判出正分
+
+
+def test_unknown_llm_check_is_safe():
+    # 未知的 llm check id：安全记 0 + not_implemented（不崩）
+    from keeplix.engines.llm_judge import judge
+
+    got, evidence = judge("nonexistent_llm_check", {})
+    assert got == 0.0
+    assert evidence == "not_implemented"

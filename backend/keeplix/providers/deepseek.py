@@ -7,6 +7,8 @@ DeepSeek 兼容 OpenAI Chat Completions 格式。联网/引用能力随官方接
 
 from __future__ import annotations
 
+from typing import Literal
+
 import httpx
 
 from keeplix.providers.base import CitedSource, EngineResponse
@@ -14,7 +16,7 @@ from keeplix.providers.base import CitedSource, EngineResponse
 
 class DeepSeekProvider:
     engine_id = "deepseek"
-    acquisition = "api"
+    acquisition: Literal["api", "browser", "stub"] = "api"
 
     def __init__(self, api_key: str, base_url: str = "https://api.deepseek.com",
                  model: str = "deepseek-chat", timeout: float = 30.0) -> None:

@@ -13,6 +13,7 @@ from typing import Any
 import yaml
 
 from keeplix.config import RUBRIC_ZH
+from keeplix.engines.llm_judge import judge
 
 # check_id → 评估函数：输入 signals，返回 [0,1] 的达成比例
 CheckFunc = Callable[[dict], float]
@@ -86,16 +87,21 @@ def score(signals: dict, engine_id: str | None = None) -> dict:
         check_details = []
         for c in checks:
             cid = c["id"]
-            fn = CHECK_FUNCS.get(cid)
-            if fn is None:
-                got = 0.0
-                evidence = "not_implemented"
+            method = c.get("method", "rule")
+            if method == "llm":
+                got, evidence = judge(cid, signals)
             else:
-                got = fn(signals)
-                evidence = "pass" if got >= 1.0 else ("partial" if got > 0 else "fail")
+                fn = CHECK_FUNCS.get(cid)
+                if fn is None:
+                    got, evidence = 0.0, "not_implemented"
+                else:
+                    got = fn(signals)
+                    evidence = (
+                        "pass" if got >= 1.0 else ("partial" if got > 0 else "fail")
+                    )
             achieved += got * float(c["weight"])
             check_details.append(
-                {"id": cid, "method": c.get("method", "rule"), "got": round(got, 2),
+                {"id": cid, "method": method, "got": round(got, 2),
                  "evidence": evidence}
             )
 

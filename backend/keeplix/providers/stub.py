@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import hashlib
+from typing import Literal
 
 from keeplix.providers.base import CitedSource, EngineResponse
 
@@ -33,7 +34,7 @@ def _digest(engine_id: str, prompt: str) -> int:
 class StubProvider:
     """确定性假 provider。品牌是否被提及由 hash 决定，稳定可复现。"""
 
-    acquisition = "stub"
+    acquisition: Literal["api", "browser", "stub"] = "stub"
 
     def __init__(self, engine_id: str, brand_name: str | None = None,
                  brand_domains: list[str] | None = None) -> None:
