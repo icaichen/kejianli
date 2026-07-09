@@ -23,6 +23,12 @@ class Settings(BaseSettings):
     # --- Citation 采样 ---
     citation_samples: int = 3
 
+    # --- 抓取 ---
+    # 显式开启浏览器抓取（需要 uv sync --extra browser 装 Playwright）。
+    # 默认关：只用 httpx，快且零依赖。SSR 客户站点再打开。
+    use_browser: bool = False
+    fetch_user_agent: str = "keeplix-bot/0.1 (+https://keeplix.example)"
+
     # --- 模型 key（有则对应引擎切真实，无则 stub）---
     deepseek_api_key: str | None = None
     deepseek_base_url: str = "https://api.deepseek.com"

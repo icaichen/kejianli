@@ -1,6 +1,7 @@
 """抓取 + HTML 结构解析 → signals（供 scoring 的 checks 消费）。
 
-抓取：默认 httpx（任何机器可跑）；装了 Playwright（extras: browser）时用它抓 SSR。
+抓取：默认 httpx（快 + 零依赖）。开 `KEEPLIX_USE_BROWSER=1` 且装了 Playwright
+（`uv sync --extra browser` + `playwright install chromium`）后走浏览器抓 SSR 页。
 解析：BeautifulSoup 抽取结构/权威/新鲜度/实体信号，输出 dict signals。
 """
 
@@ -12,6 +13,7 @@ from dataclasses import dataclass, field
 import httpx
 from bs4 import BeautifulSoup
 
+from keeplix.core.config import get_settings
 from keeplix.core.logging import get_logger
 
 log = get_logger("engines.analysis")
@@ -32,39 +34,54 @@ class FetchResult:
         self.ok = self.status == 200 and bool(self.html)
 
 
-async def fetch(url: str, timeout: float = 20.0) -> FetchResult:
-    """抓取页面 HTML。优先 Playwright（若可用），否则 httpx。
+async def fetch(url: str, timeout: float = 20.0, use_browser: bool | None = None) -> FetchResult:
+    """抓取页面 HTML。默认 httpx；`use_browser` 或 `KEEPLIX_USE_BROWSER=1` 时用 Playwright。
 
-    任何失败（无网络、DNS、超时、被墙）都降级为 status=0 的空结果，
+    任何失败（无网络、DNS、超时、被墙、Playwright 缺失）都降级为 status=0 的空结果，
     保证骨架在任何机器上都不抛 500——抓取失败的页面自然得低分。
     """
-    try:
-        html = await _fetch_playwright(url, timeout)
-        if html is not None:
-            return FetchResult(url=url, status=200, html=html)
-    except Exception as e:  # noqa: BLE001 - Playwright 缺失/失败都降级
-        log.info("Playwright 不可用，降级 httpx：%s", e)
+    settings = get_settings()
+    should_use_browser = settings.use_browser if use_browser is None else use_browser
+    user_agent = settings.fetch_user_agent
+
+    if should_use_browser:
+        try:
+            html = await _fetch_playwright(url, timeout, user_agent)
+            if html is not None:
+                return FetchResult(url=url, status=200, html=html)
+        except Exception as e:  # noqa: BLE001 - Playwright 缺失/失败都降级 httpx
+            log.info("Playwright 抓取失败，降级 httpx：%s", e)
 
     try:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-            resp = await client.get(url, headers={"User-Agent": "keeplix-bot/0.1"})
+            resp = await client.get(url, headers={"User-Agent": user_agent})
             return FetchResult(url=url, status=resp.status_code, html=resp.text)
     except Exception as e:  # noqa: BLE001 - 网络/沙箱无网都降级，不抛 500
         log.warning("抓取失败（%s），降级为空结果：%s", url, e)
         return FetchResult(url=url, status=0, html="")
 
 
-async def _fetch_playwright(url: str, timeout: float) -> str | None:
-    """仅当安装了 playwright extras 时生效；否则抛 ImportError 由上层降级。"""
+async def _fetch_playwright(url: str, timeout: float, user_agent: str) -> str | None:
+    """仅当安装了 playwright extras 时生效；否则抛 ImportError 由上层降级。
+
+    等到 networkidle 以确保 SSR/CSR 页面的初始异步请求都完成——GEO 分析常需要
+    看动态注入的 JSON-LD、作者卡片等，httpx 拿不到。
+    """
     from playwright.async_api import async_playwright  # type: ignore
 
+    timeout_ms = timeout * 1000
     async with async_playwright() as p:
         browser = await p.chromium.launch()
-        page = await browser.new_page()
-        await page.goto(url, timeout=timeout * 1000)
-        html = await page.content()
-        await browser.close()
-        return html
+        try:
+            context = await browser.new_context(
+                user_agent=user_agent,
+                viewport={"width": 1440, "height": 900},
+            )
+            page = await context.new_page()
+            await page.goto(url, timeout=timeout_ms, wait_until="networkidle")
+            return await page.content()
+        finally:
+            await browser.close()
 
 
 def parse(fetch_result: FetchResult, preferred_sources: list[str] | None = None) -> dict:
