@@ -17,9 +17,15 @@ from keeplix.providers.base import CitedSource, EngineResponse
 class DeepSeekProvider:
     engine_id = "deepseek"
     acquisition: Literal["api", "browser", "stub"] = "api"
+    measurement_scope = "brand_awareness"
 
-    def __init__(self, api_key: str, base_url: str = "https://api.deepseek.com",
-                 model: str = "deepseek-chat", timeout: float = 30.0) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str = "https://api.deepseek.com",
+        model: str = "deepseek-v4-flash",
+        timeout: float = 30.0,
+    ) -> None:
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
         self._model = model

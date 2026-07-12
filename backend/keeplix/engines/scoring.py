@@ -70,8 +70,16 @@ def _dimension_weights(rubric: dict, engine_id: str | None) -> dict[str, float]:
     return {name: w / total * 100 for name, w in weights.items()}
 
 
-def score(signals: dict, engine_id: str | None = None) -> dict:
-    """返回 {total, breakdown}。breakdown[dim] = {score, weight, checks:[{id,got,evidence}]}。"""
+def score(
+    signals: dict,
+    engine_id: str | None = None,
+    llm_judgments: dict[str, tuple[float, str]] | None = None,
+) -> dict:
+    """返回 {total, breakdown}。breakdown[dim] = {score, weight, checks:[{id,got,evidence}]}。
+
+    llm_judgments：异步链路预取的真实 LLM 判分（check_id → (score, evidence)）。
+    传入则用真实结果；未传（同步/测试/无网）则回退 judge() 的确定性 heuristic。
+    """
     rubric = load_rubric()
     dim_weights = _dimension_weights(rubric, engine_id)
 
@@ -89,20 +97,20 @@ def score(signals: dict, engine_id: str | None = None) -> dict:
             cid = c["id"]
             method = c.get("method", "rule")
             if method == "llm":
-                got, evidence = judge(cid, signals)
+                if llm_judgments and cid in llm_judgments:
+                    got, evidence = llm_judgments[cid]
+                else:
+                    got, evidence = judge(cid, signals)
             else:
                 fn = CHECK_FUNCS.get(cid)
                 if fn is None:
                     got, evidence = 0.0, "not_implemented"
                 else:
                     got = fn(signals)
-                    evidence = (
-                        "pass" if got >= 1.0 else ("partial" if got > 0 else "fail")
-                    )
+                    evidence = "pass" if got >= 1.0 else ("partial" if got > 0 else "fail")
             achieved += got * float(c["weight"])
             check_details.append(
-                {"id": cid, "method": method, "got": round(got, 2),
-                 "evidence": evidence}
+                {"id": cid, "method": method, "got": round(got, 2), "evidence": evidence}
             )
 
         dim_score = achieved / check_weight_sum * dim_weight

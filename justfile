@@ -23,9 +23,15 @@ dev-be:
 dev-fe:
     cd {{frontend}} && npm run dev
 
+dev:
+    ./scripts/dev.sh
+
 test:
     cd {{backend}} && uv run pytest -q
 
 lint:
     cd {{backend}} && uv run ruff check keeplix tests
     cd {{frontend}} && npm run build
+
+tracking-due:
+    cd {{backend}} && uv run python -m keeplix.jobs.tracking

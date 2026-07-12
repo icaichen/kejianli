@@ -61,6 +61,9 @@ agency 服务的客户。
 | source_preferences | JSON[str] | 该引擎偏好信源（如百家号/知乎/抖音），供 rubric override 与建议用 |
 | enabled | bool | |
 
+### EngineQualification（答案面资格矩阵）
+同一模型名称不等于同一产品答案面。本表记录具体答案面的联网状态、采集方式、地区语言、引用可得性、人工验收状态与正式报告资格。运行时还会校验当前 Provider 是否真实连接且能力与验收记录一致；两者同时成立才可写入正式可见度趋势。
+
 ### Prompt
 采样查询。prompt 集的质量 = 测量质量。
 | id | UUID PK |
@@ -111,6 +114,10 @@ AuditRun 的评分结果（1:1）。
 | samples | int | 每 prompt 采样次数 N |
 | started_at / finished_at | datetime |
 | status | enum |
+| surface_name | str | 本次实际测量的具体答案面 |
+| provider_acquisition | str | `api` / `browser` / `stub` / `unknown` |
+| measurement_scope | str | `citation` / `answer_visibility` / `brand_awareness` / `stub` / `legacy_unclassified` |
+| report_eligible | bool | 本次运行是否允许进入正式报告与自动决策 |
 
 ### CitationResult
 单次采样样本（一个 prompt 的一次回答）。

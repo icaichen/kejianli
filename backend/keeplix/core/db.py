@@ -11,9 +11,7 @@ from keeplix.core.config import get_settings
 _settings = get_settings()
 
 # SQLite 需要 check_same_thread=False 以配合 FastAPI 的线程模型
-_connect_args = (
-    {"check_same_thread": False} if _settings.database_url.startswith("sqlite") else {}
-)
+_connect_args = {"check_same_thread": False} if _settings.database_url.startswith("sqlite") else {}
 
 engine = create_engine(_settings.database_url, connect_args=_connect_args)
 

@@ -13,33 +13,61 @@ from keeplix.agents import (
     RecommendationInput,
     Workflow,
 )
-from keeplix.models import AuditRun, Page, Recommendation, Score
+from keeplix.models import AuditRun, Page, ProjectActivity, Recommendation, Score
 from keeplix.models.enums import RunStatus, Severity
 from keeplix.schemas import AnalysisRequest, AnalysisResponse, RecommendationDTO
 
 
 async def run_analysis(req: AnalysisRequest, session: Session) -> AnalysisResponse:
     wf = Workflow()
+    activity: ProjectActivity | None = None
 
-    analysis_out = await wf.step(
-        "analysis",
-        AnalysisAgent(),
-        AnalysisInput(
-            url=req.url,
-            engine_id=req.engine_id,
-            preferred_sources=req.preferred_sources,
-        ),
-    )
-    rec_out = await wf.step(
-        "recommendation",
-        RecommendationAgent(),
-        RecommendationInput(
-            url=req.url,
-            breakdown=analysis_out.breakdown,
-            brand_name=req.brand_name,
-            first_paragraph=analysis_out.signals.get("first_paragraph"),
-        ),
-    )
+    if req.project_id:
+        activity = ProjectActivity(
+            project_id=req.project_id,
+            cycle_id=req.cycle_id,
+            kind="audit",
+            title="运行网站 GEO 审计",
+            triggered_by="user",
+            status=RunStatus.running,
+            input_snapshot={
+                "url": req.url,
+                "engine_id": req.engine_id,
+                "brand_name": req.brand_name,
+            },
+        )
+        session.add(activity)
+        session.commit()
+        session.refresh(activity)
+
+    try:
+        analysis_out = await wf.step(
+            "analysis",
+            AnalysisAgent(),
+            AnalysisInput(
+                url=req.url,
+                engine_id=req.engine_id,
+                preferred_sources=req.preferred_sources,
+            ),
+        )
+        rec_out = await wf.step(
+            "recommendation",
+            RecommendationAgent(),
+            RecommendationInput(
+                url=req.url,
+                breakdown=analysis_out.breakdown,
+                brand_name=req.brand_name,
+                first_paragraph=analysis_out.signals.get("first_paragraph"),
+            ),
+        )
+    except Exception as error:
+        if activity:
+            activity.status = RunStatus.failed
+            activity.finished_at = datetime.now(UTC)
+            activity.output_summary = {"error_type": type(error).__name__}
+            session.add(activity)
+            session.commit()
+        raise
 
     # --- 落库 ---
     page = Page(
@@ -52,6 +80,7 @@ async def run_analysis(req: AnalysisRequest, session: Session) -> AnalysisRespon
     session.flush()
 
     audit = AuditRun(
+        activity_id=activity.id if activity else None,
         page_id=page.id,
         engine_id=req.engine_id,
         status=RunStatus.done,
@@ -60,8 +89,9 @@ async def run_analysis(req: AnalysisRequest, session: Session) -> AnalysisRespon
     session.add(audit)
     session.flush()
 
-    session.add(Score(audit_run_id=audit.id, total=analysis_out.total,
-                      breakdown=analysis_out.breakdown))
+    session.add(
+        Score(audit_run_id=audit.id, total=analysis_out.total, breakdown=analysis_out.breakdown)
+    )
 
     rec_dtos: list[RecommendationDTO] = []
     for item in rec_out.items:
@@ -89,6 +119,18 @@ async def run_analysis(req: AnalysisRequest, session: Session) -> AnalysisRespon
         )
 
     session.commit()
+
+    if activity:
+        activity.status = RunStatus.done
+        activity.finished_at = datetime.now(UTC)
+        activity.output_summary = {
+            "url": req.url,
+            "total_score": analysis_out.total,
+            "recommendation_count": len(rec_out.items),
+            "high_priority_count": sum(1 for item in rec_out.items if item.severity == "high"),
+        }
+        session.add(activity)
+        session.commit()
 
     return AnalysisResponse(
         audit_run_id=audit.id,

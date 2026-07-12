@@ -10,8 +10,11 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from keeplix.core.config import Settings, get_settings
+from keeplix.providers.baidu_search import BaiduSearchProvider
 from keeplix.providers.base import EngineProvider
 from keeplix.providers.deepseek import DeepSeekProvider
+from keeplix.providers.kimi_web_search import KimiWebSearchProvider
+from keeplix.providers.qwen_web_search import QwenWebSearchProvider
 from keeplix.providers.stub import StubProvider
 
 # 已知引擎目录（id → 展示名）。信源偏好等细节在 DB 的 Engine 表 / stub。
@@ -34,12 +37,33 @@ def list_known_engines() -> dict[str, str]:
 # 有 key 时构造真实 provider 的逻辑；返回 None 表示无 key → 回退 stub。
 _REAL_BUILDERS: dict[str, Callable[[Settings], EngineProvider | None]] = {
     "deepseek": lambda s: (
-        DeepSeekProvider(s.deepseek_api_key, s.deepseek_base_url)
+        DeepSeekProvider(s.deepseek_api_key, s.deepseek_base_url, model=s.deepseek_model)
         if s.deepseek_api_key
         else None
     ),
-    # 其余引擎接入后在此登记，例如：
-    # "qwen": lambda s: QwenProvider(s.qwen_api_key) if s.qwen_api_key else None,
+    "qwen": lambda s: (
+        QwenWebSearchProvider(
+            s.dashscope_api_key or s.qwen_api_key,
+            s.qwen_search_agent_id,
+            s.qwen_search_agent_version,
+        )
+        if (s.dashscope_api_key or s.qwen_api_key) and s.qwen_search_agent_id
+        else None
+    ),
+    "kimi": lambda s: (
+        KimiWebSearchProvider(s.kimi_api_key, s.kimi_base_url, s.kimi_model)
+        if s.kimi_api_key
+        else None
+    ),
+    "baidu_ernie": lambda s: (
+        BaiduSearchProvider(
+            s.baidu_api_key,
+            s.baidu_search_base_url,
+            s.baidu_search_model,
+        )
+        if s.baidu_api_key
+        else None
+    ),
 }
 
 

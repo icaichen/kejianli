@@ -112,9 +112,7 @@ def parse(fetch_result: FetchResult, preferred_sources: list[str] | None = None)
     has_jsonld = bool(soup.find_all("script", attrs={"type": "application/ld+json"}))
     site_name = soup.find(attrs={"property": "og:site_name"})
 
-    preferred_hits = [
-        h for h in external_links if any(src in h for src in preferred_sources)
-    ]
+    preferred_hits = [h for h in external_links if any(src in h for src in preferred_sources)]
 
     return {
         # 原始度量（供 checks 计算）

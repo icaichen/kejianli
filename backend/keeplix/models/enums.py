@@ -30,6 +30,7 @@ class RunStatus(StrEnum):
     pending = "pending"
     running = "running"
     done = "done"
+    partial = "partial"
     failed = "failed"
 
 

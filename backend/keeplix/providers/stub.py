@@ -32,12 +32,14 @@ def _digest(engine_id: str, prompt: str) -> int:
 
 
 class StubProvider:
+    measurement_scope = "stub"
     """确定性假 provider。品牌是否被提及由 hash 决定，稳定可复现。"""
 
     acquisition: Literal["api", "browser", "stub"] = "stub"
 
-    def __init__(self, engine_id: str, brand_name: str | None = None,
-                 brand_domains: list[str] | None = None) -> None:
+    def __init__(
+        self, engine_id: str, brand_name: str | None = None, brand_domains: list[str] | None = None
+    ) -> None:
         self.engine_id = engine_id
         self._brand_name = brand_name or "keeplix"
         self._brand_domains = brand_domains or []

@@ -1,4 +1,4 @@
-"""Citation 编排：对每个引擎跑 CitationAgent → 落库 → SoV DTO。"""
+"""Citation orchestration with per-engine failure isolation."""
 
 from __future__ import annotations
 
@@ -8,75 +8,193 @@ from sqlmodel import Session
 
 from keeplix.agents import CitationAgent, CitationInput
 from keeplix.core.config import get_settings
-from keeplix.models import CitationResult, CitationRun, VisibilityScore
+from keeplix.models import CitationResult, CitationRun, ProjectActivity, VisibilityScore
 from keeplix.models.enums import RunStatus, Sentiment
+from keeplix.providers import get_provider
 from keeplix.schemas import CitationRunRequest, CitationRunResponse, SoVEngineResult
+from keeplix.services.qualification_service import get_qualification, is_formally_eligible
+
+
+def _provider_error(error: Exception) -> str:
+    response = getattr(error, "response", None)
+    status_code = getattr(response, "status_code", None)
+    message = ""
+    try:
+        payload = response.json() if response is not None else {}
+        error_payload = payload.get("error", {}) if isinstance(payload, dict) else {}
+        message = error_payload.get("message", "") if isinstance(error_payload, dict) else ""
+    except Exception:
+        message = ""
+    retry_after = (
+        getattr(response, "headers", {}).get("retry-after") if response is not None else None
+    )
+    if status_code == 429:
+        detail = message[:400] or "请求过于频繁或当前额度不可用"
+        return f"HTTP 429：{detail}" + (f"；{retry_after} 秒后可重试" if retry_after else "")
+    if status_code:
+        return f"HTTP {status_code}：{type(error).__name__}"
+    return type(error).__name__
 
 
 async def run_citations(req: CitationRunRequest, session: Session) -> CitationRunResponse:
     samples = req.samples or get_settings().citation_samples
     results: list[SoVEngineResult] = []
+    errors: dict[str, str] = {}
+    activity: ProjectActivity | None = None
+
+    if req.project_id:
+        activity = ProjectActivity(
+            project_id=req.project_id,
+            cycle_id=req.cycle_id,
+            kind="visibility",
+            title="运行 AI 可见度检测" if req.triggered_by == "user" else "执行追踪计划",
+            triggered_by=req.triggered_by,
+            status=RunStatus.running,
+            input_snapshot={
+                "questions": req.prompts,
+                "engine_ids": req.engine_ids,
+                "samples_per_question": samples,
+                "brand_name": req.brand_name,
+                "brand_domains": req.brand_domains or [],
+                "tracking_plan_id": req.tracking_plan_id,
+            },
+        )
+        session.add(activity)
+        session.commit()
+        session.refresh(activity)
 
     for engine_id in req.engine_ids:
-        run = CitationRun(
-            project_id=req.project_id or "",
-            engine_id=engine_id,
-            samples=samples,
-            status=RunStatus.running,
+        provider = get_provider(
+            engine_id,
+            brand_name=req.brand_name,
+            brand_domains=req.brand_domains,
         )
+        acquisition = str(getattr(provider, "acquisition", "stub"))
+        measurement_scope = str(getattr(provider, "measurement_scope", "stub"))
+        qualification = get_qualification(engine_id, session)
+        report_eligible = is_formally_eligible(qualification, acquisition, measurement_scope)
+        run: CitationRun | None = None
         if req.project_id:
-            session.add(run)
-            session.flush()
-
-        report = await CitationAgent().run(
-            CitationInput(
+            run = CitationRun(
+                project_id=req.project_id,
+                activity_id=activity.id if activity else None,
+                prompt_set_id=req.prompt_set_id,
+                tracking_plan_id=req.tracking_plan_id,
                 engine_id=engine_id,
-                prompts=req.prompts,
-                brand_name=req.brand_name,
-                aliases=req.aliases,
-                brand_domains=req.brand_domains,
+                surface_name=qualification.surface_name,
+                provider_acquisition=acquisition,
+                measurement_scope=measurement_scope,
+                report_eligible=report_eligible,
                 samples=samples,
+                status=RunStatus.running,
             )
-        )
+            session.add(run)
+            session.commit()
+            session.refresh(run)
 
-        if req.project_id:
-            for sp in report.samples:
+        try:
+            report = await CitationAgent().run(
+                CitationInput(
+                    engine_id=engine_id,
+                    prompts=req.prompts,
+                    brand_name=req.brand_name,
+                    aliases=req.aliases,
+                    brand_domains=req.brand_domains,
+                    samples=samples,
+                )
+            )
+        except Exception as error:  # one provider must not erase other engines' evidence
+            errors[engine_id] = _provider_error(error)
+            if run:
+                run.status = RunStatus.failed
+                run.finished_at = datetime.now(UTC)
+                session.add(run)
+                session.commit()
+            continue
+
+        if req.project_id and run:
+            for sample in report.samples:
                 session.add(
                     CitationResult(
                         citation_run_id=run.id,
-                        sample_index=sp.sample_index,
-                        answer_text=sp.answer_text,
-                        brand_mentioned=sp.brand_mentioned,
-                        rank=sp.rank,
-                        cited_urls=sp.cited_urls,
-                        own_domain_cited=sp.own_domain_cited,
+                        sample_index=sample.sample_index,
+                        prompt_text=sample.prompt,
+                        answer_text=sample.answer_text,
+                        brand_mentioned=sample.brand_mentioned,
+                        rank=sample.rank,
+                        cited_urls=sample.cited_urls,
+                        own_domain_cited=sample.own_domain_cited,
                         sentiment=Sentiment.neutral,
+                        raw_response=sample.raw_response,
+                        provider_metadata={
+                            key: sample.raw_response.get(key)
+                            for key in (
+                                "provider",
+                                "request_id",
+                                "agent_id",
+                                "agent_version",
+                                "model",
+                                "citation_enabled",
+                            )
+                            if key in sample.raw_response
+                        },
                     )
                 )
             run.status = RunStatus.done
             run.finished_at = datetime.now(UTC)
-            session.add(
-                VisibilityScore(
-                    project_id=req.project_id,
-                    engine_id=engine_id,
-                    entity_sov=report.entity_sov,
-                    citation_sov=report.citation_sov,
-                    avg_rank=report.avg_rank,
-                    sample_size=report.sample_size,
+            session.add(run)
+            if report_eligible:
+                session.add(
+                    VisibilityScore(
+                        project_id=req.project_id,
+                        engine_id=engine_id,
+                        surface_name=qualification.surface_name,
+                        tracking_plan_id=req.tracking_plan_id,
+                        report_eligible=True,
+                        entity_sov=report.entity_sov,
+                        citation_sov=report.citation_sov,
+                        avg_rank=report.avg_rank,
+                        sample_size=report.sample_size,
+                        entity_ci_low=report.entity_ci_low,
+                        entity_ci_high=report.entity_ci_high,
+                        citation_ci_low=report.citation_ci_low,
+                        citation_ci_high=report.citation_ci_high,
+                    )
                 )
-            )
+            session.commit()
 
         results.append(
             SoVEngineResult(
                 engine_id=report.engine_id,
+                surface_name=qualification.surface_name,
+                acquisition=acquisition,
+                measurement_scope=measurement_scope,
+                report_eligible=report_eligible,
                 entity_sov=report.entity_sov,
                 citation_sov=report.citation_sov,
                 avg_rank=report.avg_rank,
                 sample_size=report.sample_size,
+                entity_ci_low=report.entity_ci_low,
+                entity_ci_high=report.entity_ci_high,
+                citation_ci_low=report.citation_ci_low,
+                citation_ci_high=report.citation_ci_high,
             )
         )
 
-    if req.project_id:
-        session.commit()
+    status = "done" if not errors else "partial" if results else "failed"
+    if activity:
+        stored_activity = session.get(ProjectActivity, activity.id)
+        if stored_activity:
+            stored_activity.status = RunStatus(status)
+            stored_activity.finished_at = datetime.now(UTC)
+            stored_activity.output_summary = {
+                "engines": [result.model_dump() for result in results],
+                "question_count": len(req.prompts),
+                "sample_count": sum(result.sample_size for result in results),
+                "errors": errors,
+                "status": status,
+            }
+            session.add(stored_activity)
+            session.commit()
 
-    return CitationRunResponse(results=results)
+    return CitationRunResponse(results=results, status=status, errors=errors)

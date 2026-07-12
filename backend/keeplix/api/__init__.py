@@ -2,10 +2,11 @@
 
 from fastapi import APIRouter
 
-from keeplix.api import analyses, citations, engagements, engines, projects
+from keeplix.api import agents, analyses, citations, engagements, engines, projects
 
 api_router = APIRouter(prefix="/api")
 api_router.include_router(projects.router)
+api_router.include_router(agents.router)
 api_router.include_router(analyses.router)
 api_router.include_router(citations.router)
 api_router.include_router(engagements.router)
