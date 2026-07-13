@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from sqlmodel import Session
+
 
 def test_health(client):
     resp = client.get("/health")
@@ -173,6 +175,236 @@ def test_stub_evidence_never_enters_formal_visibility(client):
     assert qwen["is_stub"] is True
 
 
+def test_competitor_benchmark_is_returned_and_persisted(client, _qualified_citation_provider):
+    project = client.post(
+        "/api/projects", json={"name": "竞品基准", "primary_domain": "keeplix.com"}
+    ).json()
+    response = client.post(
+        "/api/citations/run",
+        json={
+            "project_id": project["id"],
+            "engine_ids": ["qwen"],
+            "prompts": ["GEO 工具"],
+            "brand_name": "keeplix",
+            "competitors": ["GEO"],
+            "samples": 1,
+        },
+    )
+    result = response.json()["results"][0]
+    assert result["competitor_sov"] == {"GEO": 1.0}
+    assert result["relative_sov"] == 0.5
+
+    dashboard = client.get(f"/api/projects/{project['id']}").json()
+    assert dashboard["visibility"][0]["competitor_sov"] == {"GEO": 1.0}
+    assert dashboard["evidence"][0]["competitor_mentions"] == ["GEO"]
+
+    prompt_set = client.post(
+        f"/api/projects/{project['id']}/prompt-sets",
+        json={"name": "竞品追踪", "prompts": ["GEO 工具"]},
+    ).json()
+    plan = client.post(
+        f"/api/projects/{project['id']}/tracking-plans",
+        json={
+            "prompt_set_id": prompt_set["id"],
+            "engine_ids": ["qwen"],
+            "samples": 1,
+            "cadence": "manual",
+        },
+    ).json()
+    tracked = client.post(f"/api/projects/{project['id']}/tracking-plans/{plan['id']}/run").json()
+    assert tracked["results"][0]["competitor_sov"] == {"GEO": 1.0}
+
+
+def test_project_diagnosis_uses_only_qualified_answer_evidence(client, _qualified_citation_provider):
+    project = client.post(
+        "/api/projects", json={"name": "诊断证据", "primary_domain": "keeplix.com"}
+    ).json()
+    # A real/qualified answer-surface sample. The fixture mentions the brand
+    # but has no own-domain source, yielding a citation gap.
+    client.post(
+        "/api/citations/run",
+        json={
+            "project_id": project["id"],
+            "engine_ids": ["qwen"],
+            "prompts": ["GEO 工具有哪些"],
+            "brand_name": "诊断证据",
+            "competitors": ["GEO"],
+            "samples": 1,
+        },
+    )
+    # Stub evidence is retained by the product, but cannot influence diagnosis.
+    client.post(
+        "/api/citations/run",
+        json={
+            "project_id": project["id"],
+            "engine_ids": ["deepseek"],
+            "prompts": ["另一个问题"],
+            "brand_name": "诊断证据",
+            "samples": 1,
+        },
+    )
+    dashboard = client.get(f"/api/projects/{project['id']}").json()
+    diagnosis = dashboard["diagnosis"]
+    assert diagnosis["qualified_sample_count"] == 1
+    assert diagnosis["qualified_run_count"] == 1
+    assert diagnosis["insights"][0]["kind"] == "citation_gap"
+    assert diagnosis["insights"][0]["engine_id"] == "qwen"
+    assert diagnosis["insights"][0]["competitor_mentions"] == {"GEO": 1}
+
+
+def test_qualified_diagnosis_can_create_idempotent_traceable_work_item(
+    client, engine, _qualified_citation_provider
+):
+    project = client.post(
+        "/api/projects", json={"name": "诊断转工作", "primary_domain": "keeplix.com"}
+    ).json()
+    client.post(
+        "/api/citations/run",
+        json={
+            "project_id": project["id"],
+            "engine_ids": ["qwen"],
+            "prompts": ["GEO 工具有哪些"],
+            "brand_name": "诊断转工作",
+            "competitors": ["GEO"],
+            "samples": 1,
+        },
+    )
+    dashboard = client.get(f"/api/projects/{project['id']}").json()
+    insight = dashboard["diagnosis"]["insights"][0]
+    response = client.post(
+        f"/api/projects/{project['id']}/diagnosis/{insight['id']}/work-items"
+    )
+    assert response.status_code == 200
+    item = response.json()
+    assert item["evidence_snapshot"]["diagnosis_id"] == insight["id"]
+    assert item["evidence_snapshot"]["citation_run_ids"] == insight["evidence_run_ids"]
+
+    same = client.post(
+        f"/api/projects/{project['id']}/diagnosis/{insight['id']}/work-items"
+    )
+    assert same.status_code == 200
+    assert same.json()["id"] == item["id"]
+
+    updated = client.get(f"/api/projects/{project['id']}").json()
+    assert len(updated["cycles"]) == 1
+    assert updated["cycles"][0]["measurement_config"]["questions"] == ["GEO 工具有哪些"]
+    assert updated["cycles"][0]["measurement_config"]["engine_ids"] == ["qwen"]
+
+    artifact = client.post(
+        f"/api/projects/{project['id']}/work-items/{item['id']}/artifacts",
+        json={
+            "kind": "instructions",
+            "title": "证据执行说明",
+            "content": "仅使用可验证事实；实施后按原问题复测。",
+            "structured_content": {},
+        },
+    )
+    assert artifact.status_code == 200
+    policy = client.put(
+        f"/api/projects/{project['id']}/agent-policy",
+        json={
+            "enabled": True,
+            "generation_engine": "deepseek",
+            "max_actions_per_run": 1,
+            "per_run_budget": 0.25,
+            "monthly_budget": 5.0,
+        },
+    )
+    assert policy.status_code == 200
+    # Compatibility check: a diagnostic cycle written before the explicit
+    # report_eligible field still has immutable qualified CitationRun evidence.
+    from keeplix.models import GeoCycle
+
+    with Session(engine) as session:
+        cycle = session.get(GeoCycle, item["cycle_id"])
+        assert cycle is not None
+        cycle.baseline_summary["engines"][0].pop("report_eligible", None)
+        session.add(cycle)
+        session.commit()
+    agent_plan = client.post(
+        f"/api/projects/{project['id']}/agent-runs",
+        json={"cycle_id": item["cycle_id"], "goal": "为证据诊断准备草稿"},
+    )
+    assert agent_plan.status_code == 200
+    assert agent_plan.json()["status"] == "awaiting_approval"
+    assert agent_plan.json()["actions"][0]["source_artifact_id"] == artifact.json()["id"]
+    rejected = client.patch(
+        f"/api/projects/{project['id']}/agent-runs/{agent_plan.json()['id']}",
+        json={"decision": "reject"},
+    )
+    assert rejected.status_code == 200
+    approved = client.patch(
+        f"/api/projects/{project['id']}/artifacts/{artifact.json()['id']}",
+        json={"status": "approved"},
+    )
+    assert approved.status_code == 200
+    delivery = client.post(
+        f"/api/projects/{project['id']}/artifacts/{artifact.json()['id']}/deliveries",
+        json={
+            "method": "manual",
+            "status": "published",
+            "target_url": "https://keeplix.com/evidence-update",
+            "notes": "已按批准草稿实施",
+        },
+    )
+    assert delivery.status_code == 200
+    verification = client.post(
+        f"/api/projects/{project['id']}/cycles/{item['cycle_id']}/verify"
+    )
+    assert verification.status_code == 200
+    assert verification.json()["status"] == "complete"
+    assert verification.json()["verification_summary"]["questions"] == ["GEO 工具有哪些"]
+    assert verification.json()["verification_summary"]["changes"][0]["target_url"] == (
+        "https://keeplix.com/evidence-update"
+    )
+
+
+def test_prompt_set_versions_preserve_existing_tracking_scope(client, _qualified_citation_provider):
+    project = client.post(
+        "/api/projects", json={"name": "版本化问题集", "primary_domain": "keeplix.com"}
+    ).json()
+    first = client.post(
+        f"/api/projects/{project['id']}/prompt-sets",
+        json={"name": "核心意图", "prompts": ["GEO 工具有哪些"]},
+    ).json()
+    plan = client.post(
+        f"/api/projects/{project['id']}/tracking-plans",
+        json={
+            "prompt_set_id": first["id"],
+            "engine_ids": ["qwen"],
+            "samples": 1,
+            "cadence": "manual",
+        },
+    ).json()
+    second = client.post(
+        f"/api/projects/{project['id']}/prompt-sets/{first['id']}/versions",
+        json={"prompts": ["GEO 工具有哪些", "如何提高 AI 引用率"]},
+    )
+    assert second.status_code == 200
+    assert second.json()["version"] == 2
+    assert second.json()["source_prompt_set_id"] == first["id"]
+
+    prompt_sets = client.get(f"/api/projects/{project['id']}/prompt-sets").json()
+    old = next(item for item in prompt_sets if item["id"] == first["id"])
+    assert old["active"] is False
+    assert old["prompts"] == ["GEO 工具有哪些"]
+    assert (
+        client.post(
+            f"/api/projects/{project['id']}/tracking-plans",
+            json={
+                "prompt_set_id": first["id"],
+                "engine_ids": ["qwen"],
+                "samples": 1,
+                "cadence": "manual",
+            },
+        ).status_code
+        == 400
+    )
+
+    execution = client.post(f"/api/projects/{project['id']}/tracking-plans/{plan['id']}/run").json()
+    assert execution["results"][0]["measurement_quality"]["question_count"] == 1
+
+
 def test_tracking_plan_is_returned_on_project_dashboard(client, _qualified_citation_provider):
     project = client.post(
         "/api/projects",
@@ -195,6 +427,11 @@ def test_tracking_plan_is_returned_on_project_dashboard(client, _qualified_citat
     )
     assert plan.status_code == 200
     assert plan.json()["question_count"] == 2
+    assert plan.json()["measurement_quality"]["status"] == "limited"
+    assert {item["intent"] for item in plan.json()["prompt_items"]} == {
+        "category",
+        "problem",
+    }
     assert plan.json()["engine_ids"] == ["qwen", "kimi"]
 
     dashboard = client.get(f"/api/projects/{project['id']}").json()
@@ -247,6 +484,9 @@ def test_engines_list_marks_stub(client):
     assert "deepseek" in engines
     # 无 key 时应为 stub
     assert engines["kimi"]["is_stub"] is True
+    assert engines["qwen"]["region_language"] == "zh-CN"
+    assert engines["qwen"]["auth_mode"] == "api_key"
+    assert engines["qwen"]["cost_note"]
 
 
 def test_tracking_plan_isolates_engine_failures(client, monkeypatch, _qualified_citation_provider):

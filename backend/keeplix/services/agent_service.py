@@ -14,6 +14,7 @@ from keeplix.models import (
     AgentAction,
     AgentPolicy,
     AgentRun,
+    CitationRun,
     GeoCycle,
     OptimizationArtifact,
     Project,
@@ -32,6 +33,26 @@ from keeplix.schemas import (
 
 _ACTION_COST = 0.02
 _PRIORITY_ORDER = {"high": 0, "medium": 1, "low": 2}
+
+
+def _has_formal_cycle_baseline(cycle: GeoCycle, session: Session) -> bool:
+    """Accept frozen formal evidence and safely recover pre-field diagnostic cycles."""
+    engines = cycle.baseline_summary.get("engines", [])
+    if any(engine.get("report_eligible") for engine in engines):
+        return True
+    # Early diagnostic cycles stored their originating run IDs but predated the
+    # explicit report_eligible snapshot. Re-check those immutable evidence rows
+    # instead of lowering the gate or requiring users to repeat paid sampling.
+    source_run_ids = {
+        run_id
+        for engine in engines
+        for run_id in engine.get("source_run_ids", [])
+        if isinstance(run_id, str)
+    }
+    return any(
+        run is not None and run.project_id == cycle.project_id and run.report_eligible
+        for run in (session.get(CitationRun, run_id) for run_id in source_run_ids)
+    )
 
 
 def _policy_dto(policy: AgentPolicy) -> AgentPolicyDTO:
@@ -149,8 +170,7 @@ def plan_agent_run(
     cycle = session.get(GeoCycle, req.cycle_id)
     if cycle is None or cycle.project_id != project_id or cycle.status != "active":
         raise ValueError("没有可执行的活跃优化周期")
-    baseline_engines = cycle.baseline_summary.get("engines", [])
-    if not any(engine.get("report_eligible") for engine in baseline_engines):
+    if not _has_formal_cycle_baseline(cycle, session):
         raise ValueError("当前周期没有通过验收的真实答案面证据，Agent 不得执行")
     work_items = session.exec(
         select(WorkItem).where(

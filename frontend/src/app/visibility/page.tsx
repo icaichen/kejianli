@@ -22,6 +22,7 @@ function VisibilityContent() {
   const initialProjectId = params.get("project") ?? "";
   const [brand, setBrand] = useState(initialBrand);
   const [domain, setDomain] = useState(initialDomain);
+  const [competitorsText, setCompetitorsText] = useState("");
   const [promptsText, setPromptsText] = useState("最好的 GEO 工具\n如何做中文内容优化");
   // 默认选择已验收的联网答案面，避免把演示数据误认为真实监测。
   const [selected, setSelected] = useState<string[]>(["qwen"]);
@@ -96,6 +97,7 @@ function VisibilityContent() {
         prompts,
         brand_name: brand.trim(),
         brand_domains: domain.trim() ? [domain.trim()] : undefined,
+        competitors: competitorsText.split(/[，,\n]/).map((item) => item.trim()).filter(Boolean),
         samples,
         project_id: savedProjectId,
         prompt_set_id: promptSet?.id,
@@ -148,6 +150,7 @@ function VisibilityContent() {
         <div className="visibility-fields">
           <label><span>品牌名称</span><input suppressHydrationWarning value={brand} onChange={(event) => setBrand(event.target.value)} placeholder="例如：可见力" /></label>
           <label><span>品牌域名</span><input suppressHydrationWarning value={domain} onChange={(event) => setDomain(event.target.value)} placeholder="例如：keeplix.com" /></label>
+          <label><span>主要竞品</span><input suppressHydrationWarning value={competitorsText} onChange={(event) => setCompetitorsText(event.target.value)} placeholder="例如：Semrush，Ahrefs" /></label>
           <label><span>每个问题的采样次数</span><input suppressHydrationWarning type="number" min={1} max={20} value={samples} onChange={(event) => setSamples(Number(event.target.value) || 1)} /></label>
         </div>
         <label className="prompt-field"><span>本次检测问题（每行一个）</span>{previousQuestions.length > 0 && <div className="question-source-controls"><button type="button" className={questionSource === "previous" ? "is-active" : ""} onClick={() => { setPromptsText(previousQuestions.join("\n")); setQuestionSource("previous"); }}>复用上次 {previousQuestions.length} 个问题</button><button type="button" className={questionSource === "custom" ? "is-active" : ""} onClick={() => { setPromptsText(""); setQuestionSource("custom"); }}>输入新问题</button></div>}<textarea suppressHydrationWarning value={promptsText} onChange={(event) => { setPromptsText(event.target.value); setQuestionSource("custom"); }} /></label>
@@ -160,6 +163,7 @@ function VisibilityContent() {
             return <button key={id} type="button" onClick={() => toggle(id)} aria-pressed={selected.includes(id)} disabled={!eligible} className={`${selected.includes(id) ? "is-selected" : ""}${eligible ? "" : " is-unavailable"}`}><b>{engine?.display_name ?? id}</b><small>{scopeLabel}</small></button>;
           })}</div>
         </div>
+        {engines && <details className="provider-matrix"><summary><span>答案面资格矩阵</span><b>{engines.filter((engine) => engine.report_eligible).length} 个当前可进入正式报告</b><i>↓</i></summary><div className="provider-matrix-table"><div className="provider-matrix-head"><span>答案面</span><span>当前状态</span><span>观测能力</span><span>验收与限制</span></div>{engines.map((engine) => <div className="provider-matrix-row" key={engine.id}><div><strong>{engine.display_name}</strong><small>{engine.surface_name}</small></div><div><b className={engine.report_eligible ? "is-formal" : ""}>{engine.report_eligible ? "正式报告" : engine.is_stub ? "未连接" : engine.measurement_scope === "brand_awareness" ? "仅品牌认知" : "待验收"}</b><small>{engine.acquisition} · {engine.region_language} · {engine.auth_mode}</small></div><div><span>{engine.network_enabled ? "联网答案" : "普通回答"}</span><small>{engine.citation_availability === "structured" ? "结构化来源" : engine.citation_availability === "urls" ? "来源 URL" : "无引用来源"}</small></div><div><p>{engine.validation_notes}</p>{engine.cost_note && <small>{engine.cost_note}</small>}{engine.last_validated_at && <small>最近验收：{new Date(engine.last_validated_at).toLocaleDateString("zh-CN")}</small>}</div></div>)}</div></details>}
         <div className="tracking-controls">
           <label><input type="checkbox" checked={saveTrackingPlan} onChange={(event) => setSaveTrackingPlan(event.target.checked)} />保存为追踪计划</label>
           <label><span>频率</span><select value={cadence} onChange={(event) => setCadence(event.target.value)} disabled={!saveTrackingPlan}><option value="manual">手动</option><option value="daily">每日</option><option value="weekly">每周</option><option value="monthly">每月</option></select></label>
@@ -174,7 +178,8 @@ function VisibilityContent() {
 
       {data && <section className="visibility-results">
         <div className="result-heading"><span>已保存的可见度基线</span><h2>你的品牌出现在哪里</h2><p>这些结果会成为后续优化和再次检测的对比基础。</p></div>
-        <div className="sov-table-wrap"><table><thead><tr><th>答案面</th><th>被点名率</th><th>被引用率</th><th>平均位置</th><th>样本数</th></tr></thead><tbody>{data.results.map((result) => <tr key={result.engine_id}><td>{result.surface_name || result.engine_id}<small>{result.report_eligible ? "正式报告" : "非正式样本"}</small></td><td><Bar value={result.entity_sov} /></td><td><Bar value={result.citation_sov} /></td><td>{result.avg_rank ?? "—"}</td><td>{result.sample_size}</td></tr>)}</tbody></table></div>
+        {data.results[0]?.measurement_quality && <div className="measurement-quality-summary"><strong>{data.results[0].measurement_quality.status === "comprehensive" ? "问题覆盖完整" : data.results[0].measurement_quality.status === "balanced" ? "问题覆盖较均衡" : "问题覆盖有限"}</strong><div>{Object.entries(data.results[0].measurement_quality.coverage).map(([intent, count]) => <span key={intent}>{intent} {count}</span>)}</div>{data.results[0].measurement_quality.warnings.length > 0 && <p>{data.results[0].measurement_quality.warnings.join("；")}</p>}</div>}
+        <div className="sov-table-wrap"><table><thead><tr><th>答案面</th><th>品牌提及</th><th>域名引用</th><th>相对份额</th><th>竞品提及</th><th>样本</th></tr></thead><tbody>{data.results.map((result) => <tr key={result.engine_id}><td>{result.surface_name || result.engine_id}<small>{result.report_eligible ? "正式报告" : "非正式样本"}</small></td><td><Bar value={result.entity_sov} /></td><td><Bar value={result.citation_sov} /></td><td>{result.relative_sov === null ? "—" : `${Math.round(result.relative_sov * 100)}%`}</td><td>{Object.keys(result.competitor_sov).length ? Object.entries(result.competitor_sov).map(([name, value]) => <small key={name}>{name} {Math.round(value * 100)}%</small>) : "—"}</td><td>{result.sample_size}</td></tr>)}</tbody></table></div>
         {engines && <p className="provider-note">本次进入正式项目趋势：{data.results.filter((result) => result.report_eligible).map((result) => result.surface_name || result.engine_id).join("、") || "无"}</p>}
       </section>}
     </div>

@@ -1,11 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { Providers } from "./providers";
-
-const geist = Geist({ subsets: ["latin"], variable: "--font-geist" });
-const geistMono = Geist_Mono({ subsets: ["latin"], variable: "--font-geist-mono" });
 
 const siteUrl = new URL(process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000");
 
@@ -33,7 +29,6 @@ export default function RootLayout({
   return (
     <html
       lang="zh-CN"
-      className={`${geist.variable} ${geistMono.variable}`}
       data-scroll-behavior="smooth"
     >
       <body>

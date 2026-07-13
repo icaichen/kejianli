@@ -278,6 +278,7 @@ class PromptSet(SQLModel, table=True):
     __tablename__ = "prompt_set"
     id: str = Field(default_factory=_uuid, primary_key=True)
     project_id: str = Field(foreign_key="project.id", index=True)
+    source_prompt_set_id: str | None = Field(default=None, foreign_key="prompt_set.id", index=True)
     name: str
     version: int = 1
     kind: str = "tracking"  # tracking | exploration
@@ -362,6 +363,7 @@ class CitationRun(SQLModel, table=True):
     provider_acquisition: str = "stub"
     measurement_scope: str = "stub"
     report_eligible: bool = False
+    measurement_quality: dict = Field(default_factory=dict, sa_column=Column(JSON))
     samples: int = 3
     status: RunStatus = RunStatus.pending
     started_at: datetime = Field(default_factory=_now)
@@ -380,6 +382,7 @@ class CitationResult(SQLModel, table=True):
     rank: int | None = None
     cited_urls: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     own_domain_cited: bool = False
+    competitor_mentions: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     sentiment: Sentiment | None = None
     raw_response: dict = Field(default_factory=dict, sa_column=Column(JSON))
     provider_metadata: dict = Field(default_factory=dict, sa_column=Column(JSON))
@@ -393,9 +396,12 @@ class VisibilityScore(SQLModel, table=True):
     surface_name: str = ""
     tracking_plan_id: str | None = Field(default=None, foreign_key="tracking_plan.id", index=True)
     report_eligible: bool = False
+    measurement_quality: dict = Field(default_factory=dict, sa_column=Column(JSON))
     period: datetime = Field(default_factory=_now)
     entity_sov: float = 0.0
     citation_sov: float = 0.0
+    competitor_sov: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    relative_sov: float | None = None
     avg_rank: float | None = None
     sample_size: int = 0
     entity_ci_low: float | None = None

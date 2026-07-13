@@ -15,6 +15,8 @@ aggregate:
   entity_sov    = mean(brand_mentioned)      # 品牌被点名率
   citation_sov  = mean(own_domain_cited)     # 内容被引用率
   avg_rank      = mean(rank | mentioned)
+  competitor_sov[name] = mean(name_mentioned)
+  relative_sov  = brand_mentions / (brand_mentions + all_competitor_mentions)
 ```
 
 - **N 与判定策略是配置项**（`core/config.py` / 请求参数）。
@@ -28,6 +30,7 @@ aggregate:
 | **citation-SoV** | 回答里**你的 URL 被当来源引用**的样本占比 | 对用户常不可见，但影响答案；做内容资产分析用 |
 
 竞争视角：把竞品名一并统计，得到相对 SoV（你 vs 竞品）。
+同一回答可以同时提及多个品牌，因此各实体的提及率相加可以超过 100%；`relative_sov` 使用提及次数份额，不伪装成互斥排名。
 
 ## 3. Provider 抽象：三种数据获取方式
 

@@ -4,11 +4,18 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from keeplix.agents import CitationAgent, CitationInput
 from keeplix.core.config import get_settings
-from keeplix.models import CitationResult, CitationRun, ProjectActivity, VisibilityScore
+from keeplix.engines.prompt_quality import summarize_prompt_quality
+from keeplix.models import (
+    BrandEntity,
+    CitationResult,
+    CitationRun,
+    ProjectActivity,
+    VisibilityScore,
+)
 from keeplix.models.enums import RunStatus, Sentiment
 from keeplix.providers import get_provider
 from keeplix.schemas import CitationRunRequest, CitationRunResponse, SoVEngineResult
@@ -41,8 +48,27 @@ async def run_citations(req: CitationRunRequest, session: Session) -> CitationRu
     results: list[SoVEngineResult] = []
     errors: dict[str, str] = {}
     activity: ProjectActivity | None = None
+    measurement_quality = summarize_prompt_quality(req.prompts, req.brand_name, req.aliases)
+    competitors = list(
+        dict.fromkeys(item.strip() for item in (req.competitors or []) if item.strip())
+    )
 
     if req.project_id:
+        brand = session.exec(
+            select(BrandEntity).where(BrandEntity.project_id == req.project_id)
+        ).first()
+        if brand is None:
+            brand = BrandEntity(
+                project_id=req.project_id,
+                brand_name=req.brand_name,
+                aliases=req.aliases or [],
+                domains=req.brand_domains or [],
+                competitors=competitors,
+            )
+            session.add(brand)
+        elif req.competitors is not None:
+            brand.competitors = competitors
+            session.add(brand)
         activity = ProjectActivity(
             project_id=req.project_id,
             cycle_id=req.cycle_id,
@@ -57,6 +83,8 @@ async def run_citations(req: CitationRunRequest, session: Session) -> CitationRu
                 "brand_name": req.brand_name,
                 "brand_domains": req.brand_domains or [],
                 "tracking_plan_id": req.tracking_plan_id,
+                "measurement_quality": measurement_quality,
+                "competitors": competitors,
             },
         )
         session.add(activity)
@@ -85,6 +113,7 @@ async def run_citations(req: CitationRunRequest, session: Session) -> CitationRu
                 provider_acquisition=acquisition,
                 measurement_scope=measurement_scope,
                 report_eligible=report_eligible,
+                measurement_quality=measurement_quality,
                 samples=samples,
                 status=RunStatus.running,
             )
@@ -100,6 +129,7 @@ async def run_citations(req: CitationRunRequest, session: Session) -> CitationRu
                     brand_name=req.brand_name,
                     aliases=req.aliases,
                     brand_domains=req.brand_domains,
+                    competitors=competitors,
                     samples=samples,
                 )
             )
@@ -124,6 +154,7 @@ async def run_citations(req: CitationRunRequest, session: Session) -> CitationRu
                         rank=sample.rank,
                         cited_urls=sample.cited_urls,
                         own_domain_cited=sample.own_domain_cited,
+                        competitor_mentions=sample.competitor_mentions,
                         sentiment=Sentiment.neutral,
                         raw_response=sample.raw_response,
                         provider_metadata={
@@ -151,6 +182,9 @@ async def run_citations(req: CitationRunRequest, session: Session) -> CitationRu
                         surface_name=qualification.surface_name,
                         tracking_plan_id=req.tracking_plan_id,
                         report_eligible=True,
+                        measurement_quality=measurement_quality,
+                        competitor_sov=report.competitor_sov,
+                        relative_sov=report.relative_sov,
                         entity_sov=report.entity_sov,
                         citation_sov=report.citation_sov,
                         avg_rank=report.avg_rank,
@@ -170,6 +204,9 @@ async def run_citations(req: CitationRunRequest, session: Session) -> CitationRu
                 acquisition=acquisition,
                 measurement_scope=measurement_scope,
                 report_eligible=report_eligible,
+                measurement_quality=measurement_quality,
+                competitor_sov=report.competitor_sov,
+                relative_sov=report.relative_sov,
                 entity_sov=report.entity_sov,
                 citation_sov=report.citation_sov,
                 avg_rank=report.avg_rank,
@@ -193,6 +230,7 @@ async def run_citations(req: CitationRunRequest, session: Session) -> CitationRu
                 "sample_count": sum(result.sample_size for result in results),
                 "errors": errors,
                 "status": status,
+                "measurement_quality": measurement_quality,
             }
             session.add(stored_activity)
             session.commit()

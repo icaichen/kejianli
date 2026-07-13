@@ -20,6 +20,7 @@ from keeplix.schemas import (
     ProjectResponse,
     PromptSetCreate,
     PromptSetResponse,
+    PromptSetVersionCreate,
     TrackingExecutionResponse,
     TrackingPlanCreate,
     TrackingPlanResponse,
@@ -31,7 +32,9 @@ from keeplix.services.project_service import (
     create_artifact_revision,
     create_delivery_record,
     create_project,
+    create_work_item_from_diagnosis,
     create_prompt_set,
+    create_prompt_set_version,
     create_tracking_plan,
     execute_tracking_plan,
     export_artifact,
@@ -87,6 +90,22 @@ def create_prompt_set_route(
         raise HTTPException(status_code=404, detail=str(error)) from error
 
 
+@router.post(
+    "/projects/{project_id}/prompt-sets/{prompt_set_id}/versions",
+    response_model=PromptSetResponse,
+)
+def create_prompt_set_version_route(
+    project_id: str,
+    prompt_set_id: str,
+    req: PromptSetVersionCreate,
+    session: Session = Depends(get_session),
+) -> PromptSetResponse:
+    try:
+        return create_prompt_set_version(project_id, prompt_set_id, req, session)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
 @router.get("/projects/{project_id}/tracking-plans", response_model=list[TrackingPlanResponse])
 def tracking_plans(
     project_id: str,
@@ -104,7 +123,8 @@ def create_tracking_plan_route(
     try:
         return create_tracking_plan(project_id, req, session)
     except ValueError as error:
-        raise HTTPException(status_code=404, detail=str(error)) from error
+        status_code = 404 if "不存在" in str(error) else 400
+        raise HTTPException(status_code=status_code, detail=str(error)) from error
 
 
 @router.post(
@@ -138,6 +158,21 @@ def update_work_item_route(
 ) -> WorkItemDTO:
     try:
         return update_work_item(project_id, work_item_id, req, session)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@router.post(
+    "/projects/{project_id}/diagnosis/{diagnosis_id}/work-items",
+    response_model=WorkItemDTO,
+)
+def create_work_item_from_diagnosis_route(
+    project_id: str,
+    diagnosis_id: str,
+    session: Session = Depends(get_session),
+) -> WorkItemDTO:
+    try:
+        return create_work_item_from_diagnosis(project_id, diagnosis_id, session)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 

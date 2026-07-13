@@ -50,8 +50,11 @@ export interface SoVEngineResult {
   acquisition: string;
   measurement_scope: "citation" | "answer_visibility" | "brand_awareness" | "stub";
   report_eligible: boolean;
+  measurement_quality: MeasurementQuality;
   entity_sov: number;
   citation_sov: number;
+  competitor_sov: Record<string, number>;
+  relative_sov: number | null;
   avg_rank: number | null;
   sample_size: number;
   entity_ci_low: number;
@@ -72,6 +75,7 @@ export interface CitationRunRequest {
   brand_name: string;
   aliases?: string[];
   brand_domains?: string[];
+  competitors?: string[];
   samples?: number;
   project_id?: string | null;
   prompt_set_id?: string | null;
@@ -85,6 +89,7 @@ export interface ProjectCreateRequest {
 }
 
 export interface PromptSetCreateRequest { name: string; prompts: string[]; kind?: string; }
+export interface PromptSetVersionCreateRequest { name?: string; prompts: string[]; }
 
 export interface TrackingPlanCreateRequest {
   prompt_set_id: string;
@@ -115,6 +120,7 @@ export interface ProjectDashboard extends Project {
   citation_runs: number;
   visibility: VisibilitySnapshot[];
   evidence: CitationEvidence[];
+  diagnosis: DiagnosisSummary;
   prompt_sets: PromptSet[];
   tracking_plans: TrackingPlan[];
   activities: ProjectActivity[];
@@ -122,6 +128,31 @@ export interface ProjectDashboard extends Project {
   work_items: WorkItem[];
   agent_policy: AgentPolicy | null;
   agent_runs: AgentRun[];
+}
+
+export interface VisibilityDiagnosis {
+  id: string;
+  priority: "high" | "medium" | "low";
+  kind: "competitor_gap" | "citation_gap" | "visibility_gap";
+  title: string;
+  detail: string;
+  engine_id: string;
+  prompt_text: string;
+  prompt_intent: "branded" | "category" | "problem" | "comparison";
+  sample_size: number;
+  brand_mentions: number;
+  own_domain_citations: number;
+  competitor_mentions: Record<string, number>;
+  cited_urls: string[];
+  evidence_run_ids: string[];
+}
+
+export interface DiagnosisSummary {
+  qualified_sample_count: number;
+  qualified_run_count: number;
+  coverage_status: "unavailable" | "limited" | "balanced" | "comprehensive";
+  warnings: string[];
+  insights: VisibilityDiagnosis[];
 }
 
 export interface AgentPolicy {
@@ -284,13 +315,25 @@ export interface ProjectActivity {
   finished_at: string | null;
 }
 
-export interface PromptSet { id: string; name: string; version: number; kind: string; active: boolean; prompts: string[]; }
+export interface PromptItem { id: string; text: string; intent: "branded" | "category" | "problem" | "comparison"; }
+export interface MeasurementQuality {
+  status: "comprehensive" | "balanced" | "limited";
+  question_count: number;
+  coverage: Record<string, number>;
+  covered_intents: string[];
+  missing_intents: string[];
+  warnings: string[];
+  prompt_intents: Array<{ text: string; intent: string }>;
+}
+export interface PromptSet { id: string; source_prompt_set_id: string | null; name: string; version: number; kind: string; active: boolean; prompts: string[]; prompt_items: PromptItem[]; measurement_quality: MeasurementQuality; created_at: string; }
 
 export interface TrackingPlan {
   id: string;
   prompt_set_id: string;
   prompt_set_name: string;
   question_count: number;
+  prompt_items: PromptItem[];
+  measurement_quality: MeasurementQuality;
   engine_ids: string[];
   samples: number;
   cadence: string;
@@ -321,6 +364,7 @@ export interface CitationEvidence {
   cited_urls: string[];
   brand_mentioned: boolean;
   own_domain_cited: boolean;
+  competitor_mentions: string[];
   request_id: string | null;
   surface_name: string;
   measurement_scope: string;
@@ -361,6 +405,8 @@ export interface EngineInfo {
   measurement_scope: "citation" | "answer_visibility" | "brand_awareness" | "stub";
   surface_name: string;
   network_enabled: boolean;
+  region_language: string;
+  auth_mode: string;
   citation_availability: "none" | "urls" | "structured";
   validation_status: "pending" | "accepted" | "rejected";
   report_eligible: boolean;
@@ -428,10 +474,12 @@ export const api = {
   project: (id: string) => get<ProjectDashboard>(`/api/projects/${id}`),
   promptSets: (id: string) => get<PromptSet[]>(`/api/projects/${id}/prompt-sets`),
   createPromptSet: (id: string, req: PromptSetCreateRequest) => post<PromptSet>(`/api/projects/${id}/prompt-sets`, req),
+  createPromptSetVersion: (id: string, promptSetId: string, req: PromptSetVersionCreateRequest) => post<PromptSet>(`/api/projects/${id}/prompt-sets/${promptSetId}/versions`, req),
   trackingPlans: (id: string) => get<TrackingPlan[]>(`/api/projects/${id}/tracking-plans`),
   createTrackingPlan: (id: string, req: TrackingPlanCreateRequest) => post<TrackingPlan>(`/api/projects/${id}/tracking-plans`, req),
   runTrackingPlan: (projectId: string, planId: string) => post<TrackingExecution>(`/api/projects/${projectId}/tracking-plans/${planId}/run`, {}),
   updateWorkItem: (projectId: string, itemId: string, req: { status?: WorkItem["status"]; execution_mode?: WorkItem["execution_mode"] }) => patch<WorkItem>(`/api/projects/${projectId}/work-items/${itemId}`, req),
+  createWorkItemFromDiagnosis: (projectId: string, diagnosisId: string) => post<WorkItem>(`/api/projects/${projectId}/diagnosis/${encodeURIComponent(diagnosisId)}/work-items`, {}),
   workItem: (projectId: string, itemId: string) => get<WorkItemDetail>(`/api/projects/${projectId}/work-items/${itemId}`),
   createArtifactRevision: (projectId: string, itemId: string, req: { kind: OptimizationArtifact["kind"]; title: string; content: string; structured_content: Record<string, unknown> }) => post<OptimizationArtifact>(`/api/projects/${projectId}/work-items/${itemId}/artifacts`, req),
   updateArtifactStatus: (projectId: string, artifactId: string, status: "approved") => patch<OptimizationArtifact>(`/api/projects/${projectId}/artifacts/${artifactId}`, { status }),

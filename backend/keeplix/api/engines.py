@@ -24,6 +24,8 @@ class EngineInfo(BaseModel):
     measurement_scope: str
     surface_name: str
     network_enabled: bool
+    region_language: str
+    auth_mode: str
     citation_availability: str
     validation_status: str
     report_eligible: bool
@@ -49,6 +51,8 @@ def index(session: Session = Depends(get_session)) -> list[EngineInfo]:
                 measurement_scope=measurement_scope,
                 surface_name=qualification.surface_name,
                 network_enabled=qualification.network_enabled,
+                region_language=qualification.region_language,
+                auth_mode=qualification.auth_mode,
                 citation_availability=qualification.citation_availability,
                 validation_status=qualification.validation_status,
                 report_eligible=is_formally_eligible(qualification, acquisition, measurement_scope),

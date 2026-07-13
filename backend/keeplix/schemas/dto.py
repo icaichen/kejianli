@@ -47,6 +47,7 @@ class CitationRunRequest(BaseModel):
     brand_name: str
     aliases: list[str] | None = None
     brand_domains: list[str] | None = None
+    competitors: list[str] | None = None
     samples: int | None = Field(default=None, description="每 prompt 采样次数；null=用默认")
     project_id: str | None = None
     prompt_set_id: str | None = None
@@ -61,8 +62,11 @@ class SoVEngineResult(BaseModel):
     acquisition: str = "stub"
     measurement_scope: str = "stub"
     report_eligible: bool = False
+    measurement_quality: dict = Field(default_factory=dict)
     entity_sov: float
     citation_sov: float
+    competitor_sov: dict[str, float] = Field(default_factory=dict)
+    relative_sov: float | None = None
     avg_rank: float | None
     sample_size: int
     entity_ci_low: float
@@ -101,13 +105,22 @@ class PromptSetCreate(BaseModel):
     kind: str = "tracking"
 
 
+class PromptSetVersionCreate(BaseModel):
+    prompts: list[str] = Field(min_length=1)
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+
+
 class PromptSetResponse(BaseModel):
     id: str
+    source_prompt_set_id: str | None
     name: str
     version: int
     kind: str
     active: bool
     prompts: list[str]
+    prompt_items: list[dict] = Field(default_factory=list)
+    measurement_quality: dict = Field(default_factory=dict)
+    created_at: datetime
 
 
 class TrackingPlanCreate(BaseModel):
@@ -123,6 +136,8 @@ class TrackingPlanResponse(BaseModel):
     prompt_set_id: str
     prompt_set_name: str
     question_count: int
+    prompt_items: list[dict] = Field(default_factory=list)
+    measurement_quality: dict = Field(default_factory=dict)
     engine_ids: list[str]
     samples: int
     cadence: str
@@ -140,8 +155,11 @@ class VisibilitySnapshot(BaseModel):
     acquisition: str = "api"
     measurement_scope: str = "citation"
     report_eligible: bool = True
+    measurement_quality: dict = Field(default_factory=dict)
     entity_sov: float
     citation_sov: float
+    competitor_sov: dict[str, float] = Field(default_factory=dict)
+    relative_sov: float | None = None
     avg_rank: float | None
     sample_size: int
     entity_ci_low: float | None = None
@@ -176,10 +194,38 @@ class CitationEvidence(BaseModel):
     cited_urls: list[str]
     brand_mentioned: bool
     own_domain_cited: bool
+    competitor_mentions: list[str] = Field(default_factory=list)
     request_id: str | None = None
     surface_name: str = ""
     measurement_scope: str = "stub"
     report_eligible: bool = False
+
+
+class VisibilityDiagnosis(BaseModel):
+    """一个由正式答案面样本直接得出的诊断，不是自动生成的优化任务。"""
+
+    id: str
+    priority: str
+    kind: str
+    title: str
+    detail: str
+    engine_id: str
+    prompt_text: str
+    prompt_intent: str
+    sample_size: int
+    brand_mentions: int
+    own_domain_citations: int
+    competitor_mentions: dict[str, int] = Field(default_factory=dict)
+    cited_urls: list[str] = Field(default_factory=list)
+    evidence_run_ids: list[str] = Field(default_factory=list)
+
+
+class DiagnosisSummary(BaseModel):
+    qualified_sample_count: int = 0
+    qualified_run_count: int = 0
+    coverage_status: str = "unavailable"
+    warnings: list[str] = Field(default_factory=list)
+    insights: list[VisibilityDiagnosis] = Field(default_factory=list)
 
 
 class ProjectActivityDTO(BaseModel):
@@ -362,6 +408,7 @@ class ProjectDashboard(ProjectResponse):
     visibility: list[VisibilitySnapshot]
     citation_runs: int
     evidence: list[CitationEvidence]
+    diagnosis: DiagnosisSummary
     prompt_sets: list[PromptSetResponse]
     tracking_plans: list[TrackingPlanResponse]
     activities: list[ProjectActivityDTO]
@@ -381,6 +428,7 @@ class EngagementRequest(BaseModel):
     prompts: list[str] = Field(description="采样用的代表性 prompt 集")
     aliases: list[str] | None = None
     brand_domains: list[str] | None = None
+    competitors: list[str] | None = None
     preferred_sources: list[str] | None = None
     samples: int | None = None
     project_id: str | None = None

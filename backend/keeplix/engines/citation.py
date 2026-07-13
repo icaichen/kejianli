@@ -21,6 +21,7 @@ class SampleParse:
     brand_mentioned: bool
     cited_urls: list[str]
     own_domain_cited: bool
+    competitor_mentions: list[str] = field(default_factory=list)
     rank: int | None = None
     raw_response: dict = field(default_factory=dict)
 
@@ -36,6 +37,8 @@ class SoVReport:
     entity_ci_high: float
     citation_ci_low: float
     citation_ci_high: float
+    competitor_sov: dict[str, float] = field(default_factory=dict)
+    relative_sov: float | None = None
     samples: list[SampleParse] = field(default_factory=list)
 
 
@@ -76,9 +79,16 @@ def parse_response(
     brand_name: str,
     aliases: list[str],
     brand_domains: list[str],
+    competitors: list[str] | None = None,
 ) -> SampleParse:
     names = [brand_name, *aliases]
-    mentioned = any(n and n in answer_text for n in names)
+    normalized_answer = answer_text.casefold()
+    mentioned = any(n and n.casefold() in normalized_answer for n in names)
+    competitor_mentions = [
+        competitor
+        for competitor in (competitors or [])
+        if competitor and competitor.casefold() in normalized_answer
+    ]
     own_cited = any(any(d in (urlparse(u).netloc or u) for d in brand_domains) for u in cited_urls)
     rank = _mention_rank(answer_text, brand_name, aliases) if mentioned else None
     return SampleParse(
@@ -88,6 +98,7 @@ def parse_response(
         brand_mentioned=mentioned,
         cited_urls=cited_urls,
         own_domain_cited=own_cited,
+        competitor_mentions=competitor_mentions,
         rank=rank,
     )
 
@@ -99,11 +110,13 @@ async def run_sampling(
     brand_name: str,
     aliases: list[str] | None = None,
     brand_domains: list[str] | None = None,
+    competitors: list[str] | None = None,
     samples: int = 3,
 ) -> SoVReport:
     """对每个 prompt 采样 samples 次，聚合成 SoVReport。"""
     aliases = aliases or []
     brand_domains = brand_domains or []
+    competitors = competitors or []
     parsed: list[SampleParse] = []
 
     for prompt in prompts:
@@ -124,6 +137,7 @@ async def run_sampling(
                     brand_name,
                     aliases,
                     brand_domains,
+                    competitors,
                 )
             )
             parsed[-1].raw_response = resp.raw
@@ -137,6 +151,17 @@ async def run_sampling(
     citation_ci_low, citation_ci_high = wilson_interval(citation_successes, len(parsed))
     ranks = [p.rank for p in parsed if p.rank is not None]
     avg_rank = (sum(ranks) / len(ranks)) if ranks else None
+    competitor_counts = {
+        competitor: sum(competitor in sample.competitor_mentions for sample in parsed)
+        for competitor in competitors
+    }
+    competitor_sov = {
+        competitor: round(count / n, 3) for competitor, count in competitor_counts.items()
+    }
+    total_entity_mentions = entity_successes + sum(competitor_counts.values())
+    relative_sov = (
+        round(entity_successes / total_entity_mentions, 3) if total_entity_mentions else None
+    )
 
     return SoVReport(
         engine_id=getattr(provider, "engine_id", "unknown"),
@@ -148,5 +173,7 @@ async def run_sampling(
         entity_ci_high=entity_ci_high,
         citation_ci_low=citation_ci_low,
         citation_ci_high=citation_ci_high,
+        competitor_sov=competitor_sov,
+        relative_sov=relative_sov,
         samples=parsed,
     )

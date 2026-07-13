@@ -17,6 +17,7 @@ class CitationInput:
     brand_name: str
     aliases: list[str] | None = None
     brand_domains: list[str] | None = None
+    competitors: list[str] | None = None
     samples: int = 3
 
 
@@ -35,5 +36,6 @@ class CitationAgent(Agent[CitationInput, SoVReport]):
             brand_name=payload.brand_name,
             aliases=payload.aliases,
             brand_domains=payload.brand_domains,
+            competitors=payload.competitors,
             samples=payload.samples,
         )

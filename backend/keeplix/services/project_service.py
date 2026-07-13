@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlmodel import Session, col, select
 
+from keeplix.engines.prompt_quality import classify_prompt, summarize_prompt_quality
 from keeplix.models import (
     BrandEntity,
     CitationResult,
@@ -25,6 +26,7 @@ from keeplix.models import (
     VisibilityScore,
     WorkItem,
 )
+from keeplix.models.enums import Severity
 from keeplix.schemas import (
     ArtifactExportResponse,
     ArtifactRevisionCreate,
@@ -34,6 +36,7 @@ from keeplix.schemas import (
     CycleVerificationResponse,
     DeliveryRecordCreate,
     DeliveryRecordDTO,
+    DiagnosisSummary,
     DueTrackingResponse,
     GeoCycleDTO,
     OptimizationArtifactDTO,
@@ -43,11 +46,13 @@ from keeplix.schemas import (
     ProjectResponse,
     PromptSetCreate,
     PromptSetResponse,
+    PromptSetVersionCreate,
     SoVEngineResult,
     TrackingExecutionResponse,
     TrackingPlanCreate,
     TrackingPlanResponse,
     VisibilitySnapshot,
+    VisibilityDiagnosis,
     WorkItemDetail,
     WorkItemDTO,
     WorkItemUpdate,
@@ -56,6 +61,119 @@ from keeplix.services.agent_service import get_agent_policy, list_agent_runs
 from keeplix.services.citation_service import run_citations
 
 _DEFAULT_ORG = "keeplix-default-org"
+
+
+def _diagnose_visibility(project_id: str, session: Session) -> DiagnosisSummary:
+    """Summarise *qualified* answer evidence into reviewable gaps.
+
+    This deliberately does not create WorkItems. A diagnosis tells the user what
+    happened in a specific answer surface and links the evidence; deciding how to
+    improve it remains a separate, approved Phase 2 action.
+    """
+    rows = session.exec(
+        select(CitationResult, CitationRun)
+        .join(CitationRun, CitationResult.citation_run_id == CitationRun.id)
+        .where(
+            CitationRun.project_id == project_id,
+            CitationRun.report_eligible,
+            CitationRun.status == "done",
+        )
+        .order_by(col(CitationRun.started_at).desc())
+    ).all()
+    if not rows:
+        return DiagnosisSummary(
+            warnings=["尚无可用于正式诊断的真实答案面样本；请先完成一次已认证答案面的检测。"],
+        )
+
+    groups: dict[tuple[str, str, str], dict] = {}
+    run_ids: set[str] = set()
+    coverage_statuses: list[str] = []
+    for result, run in rows:
+        run_ids.add(run.id)
+        quality = run.measurement_quality or {}
+        coverage_statuses.append(str(quality.get("status", "limited")))
+        intents = {
+            str(item.get("text")): str(item.get("intent", "category"))
+            for item in quality.get("prompt_intents", [])
+            if isinstance(item, dict)
+        }
+        intent = intents.get(result.prompt_text, "category")
+        key = (run.engine_id, result.prompt_text, intent)
+        group = groups.setdefault(
+            key,
+            {
+                "samples": 0,
+                "brand": 0,
+                "own": 0,
+                "competitors": {},
+                "urls": [],
+                "runs": set(),
+            },
+        )
+        group["samples"] += 1
+        group["brand"] += int(result.brand_mentioned)
+        group["own"] += int(result.own_domain_cited)
+        group["urls"].extend(result.cited_urls or [])
+        group["runs"].add(run.id)
+        for competitor in result.competitor_mentions or []:
+            group["competitors"][competitor] = group["competitors"].get(competitor, 0) + 1
+
+    insights: list[VisibilityDiagnosis] = []
+    for (engine_id, prompt_text, intent), group in groups.items():
+        competitors = group["competitors"]
+        samples = group["samples"]
+        if group["brand"] == 0 and competitors:
+            mentioned = "、".join(sorted(competitors))
+            kind, priority = "competitor_gap", "high"
+            title = "竞品已进入答案，品牌尚未出现"
+            detail = f"在「{prompt_text}」的 {samples} 个 {engine_id} 正式样本中，品牌未被提及；{mentioned} 被提及。先查看原始回答与来源，再决定是否建立优化工作。"
+        elif group["brand"] > 0 and group["own"] == 0:
+            kind, priority = "citation_gap", "medium"
+            title = "品牌被提及，但未引用自有域名"
+            detail = f"在「{prompt_text}」的 {samples} 个 {engine_id} 正式样本中，品牌出现 {group['brand']} 次，但自有域名没有作为答案来源出现。"
+        elif group["brand"] == 0:
+            kind, priority = "visibility_gap", "medium"
+            title = "当前问题下尚未进入答案"
+            detail = f"在「{prompt_text}」的 {samples} 个 {engine_id} 正式样本中，未检测到品牌提及；这只说明当前问题和答案面，不代表整个市场。"
+        else:
+            continue
+        insight_id = f"{engine_id}:{intent}:{prompt_text}".replace(" ", "-")
+        insights.append(
+            VisibilityDiagnosis(
+                id=insight_id,
+                priority=priority,
+                kind=kind,
+                title=title,
+                detail=detail,
+                engine_id=engine_id,
+                prompt_text=prompt_text,
+                prompt_intent=intent,
+                sample_size=samples,
+                brand_mentions=group["brand"],
+                own_domain_citations=group["own"],
+                competitor_mentions=competitors,
+                cited_urls=list(dict.fromkeys(group["urls"]))[:12],
+                evidence_run_ids=sorted(group["runs"]),
+            )
+        )
+    rank = {"high": 0, "medium": 1, "low": 2}
+    insights.sort(key=lambda item: (rank[item.priority], item.engine_id, item.prompt_text))
+    coverage_status = (
+        "comprehensive" if "comprehensive" in coverage_statuses else
+        "balanced" if "balanced" in coverage_statuses else "limited"
+    )
+    warnings = []
+    if coverage_status != "comprehensive":
+        warnings.append("问题集覆盖尚不完整；诊断只适用于已测问题范围，不能作为完整市场结论。")
+    if len(rows) < 8:
+        warnings.append("正式样本数量较少；建议按同一问题集持续追踪后再判断趋势。")
+    return DiagnosisSummary(
+        qualified_sample_count=len(rows),
+        qualified_run_count=len(run_ids),
+        coverage_status=coverage_status,
+        warnings=warnings,
+        insights=insights,
+    )
 
 
 def _ensure_default_org(session: Session) -> Organization:
@@ -116,30 +234,86 @@ def create_prompt_set(
     req: PromptSetCreate,
     session: Session,
 ) -> PromptSetResponse:
-    if session.get(Project, project_id) is None:
+    return _create_prompt_set(project_id, req.name, req.prompts, req.kind, session)
+
+
+def create_prompt_set_version(
+    project_id: str,
+    prompt_set_id: str,
+    req: PromptSetVersionCreate,
+    session: Session,
+) -> PromptSetResponse:
+    source = session.get(PromptSet, prompt_set_id)
+    if source is None or source.project_id != project_id:
+        raise ValueError("问题集不存在")
+    return _create_prompt_set(
+        project_id,
+        req.name or source.name,
+        req.prompts,
+        source.kind,
+        session,
+        source_prompt_set_id=source.id,
+    )
+
+
+def _create_prompt_set(
+    project_id: str,
+    name: str,
+    raw_prompts: list[str],
+    kind: str,
+    session: Session,
+    *,
+    source_prompt_set_id: str | None = None,
+) -> PromptSetResponse:
+    project = session.get(Project, project_id)
+    if project is None:
         raise ValueError("项目不存在")
+    brand = session.exec(select(BrandEntity).where(BrandEntity.project_id == project_id)).first()
+    brand_name = brand.brand_name if brand else project.name
+    aliases = brand.aliases if brand else []
     previous = session.exec(
-        select(PromptSet).where(PromptSet.project_id == project_id, PromptSet.name == req.name)
+        select(PromptSet).where(PromptSet.project_id == project_id, PromptSet.name == name)
     ).all()
     prompt_set = PromptSet(
         project_id=project_id,
-        name=req.name,
+        source_prompt_set_id=source_prompt_set_id,
+        name=name,
         version=len(previous) + 1,
-        kind=req.kind,
+        kind=kind,
     )
     session.add(prompt_set)
     session.flush()
-    prompts = [text.strip() for text in req.prompts if text.strip()]
+    prompts = list(dict.fromkeys(text.strip() for text in raw_prompts if text.strip()))
+    if not prompts:
+        raise ValueError("问题集至少需要一个有效问题")
+    prompt_rows = []
     for text in prompts:
-        session.add(Prompt(project_id=project_id, prompt_set_id=prompt_set.id, text=text))
+        prompt = Prompt(
+            project_id=project_id,
+            prompt_set_id=prompt_set.id,
+            text=text,
+            intent=classify_prompt(text, brand_name, aliases),
+        )
+        prompt_rows.append(prompt)
+        session.add(prompt)
+    for existing in previous:
+        existing.active = False
+        session.add(existing)
     session.commit()
     return PromptSetResponse(
         id=prompt_set.id,
+        source_prompt_set_id=prompt_set.source_prompt_set_id,
         name=prompt_set.name,
         version=prompt_set.version,
         kind=prompt_set.kind,
         active=prompt_set.active,
         prompts=prompts,
+        prompt_items=[
+            {"id": prompt.id, "text": prompt.text, "intent": prompt.intent.value}
+            for prompt in prompt_rows
+        ],
+        measurement_quality=summarize_prompt_quality(prompts, brand_name, aliases),
+        created_at=prompt_set.created_at,
     )
 
 
@@ -149,22 +323,34 @@ def list_prompt_sets(project_id: str, session: Session) -> list[PromptSetRespons
         .where(PromptSet.project_id == project_id)
         .order_by(col(PromptSet.created_at).desc())
     ).all()
-    return [
-        PromptSetResponse(
-            id=prompt_set.id,
-            name=prompt_set.name,
-            version=prompt_set.version,
-            kind=prompt_set.kind,
-            active=prompt_set.active,
-            prompts=[
-                prompt.text
-                for prompt in session.exec(
-                    select(Prompt).where(Prompt.prompt_set_id == prompt_set.id)
-                ).all()
-            ],
+    project = session.get(Project, project_id)
+    brand = session.exec(select(BrandEntity).where(BrandEntity.project_id == project_id)).first()
+    brand_name = brand.brand_name if brand else project.name if project else ""
+    aliases = brand.aliases if brand else []
+    responses = []
+    for prompt_set in sets:
+        prompt_rows = session.exec(
+            select(Prompt).where(Prompt.prompt_set_id == prompt_set.id)
+        ).all()
+        prompts = [prompt.text for prompt in prompt_rows]
+        responses.append(
+            PromptSetResponse(
+                id=prompt_set.id,
+                source_prompt_set_id=prompt_set.source_prompt_set_id,
+                name=prompt_set.name,
+                version=prompt_set.version,
+                kind=prompt_set.kind,
+                active=prompt_set.active,
+                prompts=prompts,
+                prompt_items=[
+                    {"id": prompt.id, "text": prompt.text, "intent": prompt.intent.value}
+                    for prompt in prompt_rows
+                ],
+                measurement_quality=summarize_prompt_quality(prompts, brand_name, aliases),
+                created_at=prompt_set.created_at,
+            )
         )
-        for prompt_set in sets
-    ]
+    return responses
 
 
 def create_tracking_plan(
@@ -177,6 +363,8 @@ def create_tracking_plan(
     prompt_set = session.get(PromptSet, req.prompt_set_id)
     if prompt_set is None or prompt_set.project_id != project_id:
         raise ValueError("问题集不存在")
+    if not prompt_set.active:
+        raise ValueError("该问题集已被新版本替代，请使用当前版本创建追踪计划")
 
     plan = TrackingPlan(
         project_id=project_id,
@@ -209,14 +397,26 @@ def _tracking_plan_response(
     prompt_set: PromptSet | None,
     session: Session,
 ) -> TrackingPlanResponse:
-    question_count = len(
-        session.exec(select(Prompt.id).where(Prompt.prompt_set_id == plan.prompt_set_id)).all()
-    )
+    prompt_rows = session.exec(
+        select(Prompt).where(Prompt.prompt_set_id == plan.prompt_set_id)
+    ).all()
+    prompts = [prompt.text for prompt in prompt_rows]
+    project = session.get(Project, plan.project_id)
+    brand = session.exec(
+        select(BrandEntity).where(BrandEntity.project_id == plan.project_id)
+    ).first()
+    brand_name = brand.brand_name if brand else project.name if project else ""
+    aliases = brand.aliases if brand else []
     return TrackingPlanResponse(
         id=plan.id,
         prompt_set_id=plan.prompt_set_id,
         prompt_set_name=prompt_set.name if prompt_set else "已删除的问题集",
-        question_count=question_count,
+        question_count=len(prompt_rows),
+        prompt_items=[
+            {"id": prompt.id, "text": prompt.text, "intent": prompt.intent.value}
+            for prompt in prompt_rows
+        ],
+        measurement_quality=summarize_prompt_quality(prompts, brand_name, aliases),
         engine_ids=plan.engine_ids,
         samples=plan.samples,
         cadence=plan.cadence,
@@ -290,6 +490,7 @@ async def execute_tracking_plan(
                     brand_name=brand_name,
                     aliases=aliases,
                     brand_domains=domains,
+                    competitors=brand.competitors if brand else [],
                     samples=plan.samples,
                 ),
                 session,
@@ -401,8 +602,11 @@ def get_project_dashboard(project_id: str, session: Session) -> ProjectDashboard
                 acquisition="api",
                 measurement_scope="citation",
                 report_eligible=score.report_eligible,
+                measurement_quality=score.measurement_quality,
                 entity_sov=score.entity_sov,
                 citation_sov=score.citation_sov,
+                competitor_sov=score.competitor_sov,
+                relative_sov=score.relative_sov,
                 avg_rank=score.avg_rank,
                 sample_size=score.sample_size,
                 entity_ci_low=score.entity_ci_low,
@@ -425,6 +629,7 @@ def get_project_dashboard(project_id: str, session: Session) -> ProjectDashboard
                 cited_urls=result.cited_urls,
                 brand_mentioned=result.brand_mentioned,
                 own_domain_cited=result.own_domain_cited,
+                competitor_mentions=result.competitor_mentions,
                 request_id=(result.provider_metadata or {}).get("request_id"),
                 surface_name=run.surface_name,
                 measurement_scope=run.measurement_scope,
@@ -432,6 +637,7 @@ def get_project_dashboard(project_id: str, session: Session) -> ProjectDashboard
             )
             for result, run in evidence_rows
         ],
+        diagnosis=_diagnose_visibility(project_id, session),
         prompt_sets=list_prompt_sets(project_id, session),
         tracking_plans=list_tracking_plans(project_id, session),
         cycles=[
@@ -522,6 +728,104 @@ def _work_item_dto(item: WorkItem) -> WorkItemDTO:
         updated_at=item.updated_at,
         completed_at=item.completed_at,
     )
+
+
+def create_work_item_from_diagnosis(
+    project_id: str,
+    diagnosis_id: str,
+    session: Session,
+) -> WorkItemDTO:
+    """Promote one reviewed, qualified diagnostic into a traceable work item."""
+    project = session.get(Project, project_id)
+    if project is None:
+        raise ValueError("项目不存在")
+    diagnosis = _diagnose_visibility(project_id, session)
+    insight = next((item for item in diagnosis.insights if item.id == diagnosis_id), None)
+    if insight is None:
+        raise ValueError("该诊断不存在、已过期，或没有正式证据")
+
+    existing = next(
+        (
+            item
+            for item in session.exec(select(WorkItem).where(WorkItem.project_id == project_id)).all()
+            if (item.evidence_snapshot or {}).get("diagnosis_id") == diagnosis_id
+            and item.status != "dismissed"
+        ),
+        None,
+    )
+    if existing:
+        return _work_item_dto(existing)
+
+    runs = [session.get(CitationRun, run_id) for run_id in insight.evidence_run_ids]
+    qualified_runs = [run for run in runs if run is not None]
+    if not qualified_runs:
+        raise ValueError("诊断证据已不可用，请重新检测")
+    latest_run = max(qualified_runs, key=lambda run: run.started_at)
+    cycle = session.exec(
+        select(GeoCycle)
+        .where(GeoCycle.project_id == project_id, GeoCycle.status == "active")
+        .order_by(col(GeoCycle.started_at).desc())
+    ).first()
+    if cycle is None:
+        brand = session.exec(select(BrandEntity).where(BrandEntity.project_id == project_id)).first()
+        cycle = GeoCycle(
+            project_id=project_id,
+            name=f"证据优化周期 {datetime.now(UTC).strftime('%Y-%m-%d')}",
+            objective=f"改善「{insight.prompt_text}」在 {insight.engine_id} 答案面中的可见度与引用",
+            stage="improve",
+            measurement_config={
+                "questions": [insight.prompt_text],
+                "engine_ids": [insight.engine_id],
+                "samples": latest_run.samples,
+                "brand_name": brand.brand_name if brand else project.name,
+                "aliases": brand.aliases if brand else [],
+                "brand_domains": brand.domains if brand else ([project.primary_domain] if project.primary_domain else []),
+                "competitors": brand.competitors if brand else [],
+            },
+            baseline_summary={
+                "captured_at": (latest_run.finished_at or latest_run.started_at).isoformat(),
+                "engines": [{
+                    "engine_id": insight.engine_id,
+                    "report_eligible": True,
+                    "measurement_scope": "citation",
+                    "source_surface": latest_run.surface_name,
+                    "sample_size": insight.sample_size,
+                    "entity_sov": insight.brand_mentions / insight.sample_size,
+                    "citation_sov": insight.own_domain_citations / insight.sample_size,
+                    "competitor_mentions": insight.competitor_mentions,
+                    "source_run_ids": insight.evidence_run_ids,
+                }],
+            },
+        )
+        session.add(cycle)
+        session.flush()
+
+    item = WorkItem(
+        project_id=project_id,
+        cycle_id=cycle.id,
+        source_activity_id=latest_run.activity_id,
+        title=f"{insight.title}：{insight.prompt_text}",
+        detail=insight.detail,
+        category={"citation_gap": "citation", "competitor_gap": "competitive"}.get(insight.kind, "visibility"),
+        priority=Severity(insight.priority),
+        evidence_snapshot={
+            "diagnosis_id": insight.id,
+            "diagnosis_kind": insight.kind,
+            "engine_id": insight.engine_id,
+            "prompt_text": insight.prompt_text,
+            "prompt_intent": insight.prompt_intent,
+            "sample_size": insight.sample_size,
+            "brand_mentions": insight.brand_mentions,
+            "own_domain_citations": insight.own_domain_citations,
+            "competitor_mentions": insight.competitor_mentions,
+            "cited_urls": insight.cited_urls,
+            "citation_run_ids": insight.evidence_run_ids,
+        },
+    )
+    session.add(item)
+    session.commit()
+    session.refresh(item)
+    return _work_item_dto(item)
 
 
 def _artifact_dto(artifact: OptimizationArtifact) -> OptimizationArtifactDTO:
@@ -805,6 +1109,7 @@ async def verify_geo_cycle(
             brand_name=config.get("brand_name", ""),
             aliases=config.get("aliases", []),
             brand_domains=config.get("brand_domains", []),
+            competitors=config.get("competitors", []),
             samples=config.get("samples", 3),
         ),
         session,

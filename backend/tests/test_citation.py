@@ -6,6 +6,7 @@ import pytest
 
 from keeplix.engines import citation
 from keeplix.engines.citation import parse_response, wilson_interval
+from keeplix.providers.base import EngineResponse
 from keeplix.providers.stub import StubProvider
 
 
@@ -33,6 +34,43 @@ def test_parse_response_detects_brand_and_own_domain():
     assert sp.brand_mentioned is True
     assert sp.own_domain_cited is True
     assert sp.rank == 1
+
+
+def test_parse_response_records_competitors_case_insensitively():
+    sample = parse_response(
+        prompt="q",
+        sample_index=0,
+        answer_text="Keeplix、Semrush 和 AHREFS 都是可选工具。",
+        cited_urls=[],
+        brand_name="keeplix",
+        aliases=[],
+        brand_domains=[],
+        competitors=["Semrush", "Ahrefs"],
+    )
+    assert sample.brand_mentioned is True
+    assert sample.competitor_mentions == ["Semrush", "Ahrefs"]
+
+
+@pytest.mark.asyncio
+async def test_relative_sov_counts_brand_and_competitor_mentions():
+    class BenchmarkProvider:
+        engine_id = "qwen"
+        acquisition = "api"
+
+        async def query(self, prompt):
+            answer = "keeplix 和 Semrush" if prompt == "a" else "Semrush"
+            return EngineResponse(answer_text=answer)
+
+    report = await citation.run_sampling(
+        BenchmarkProvider(),
+        ["a", "b"],
+        brand_name="keeplix",
+        competitors=["Semrush"],
+        samples=1,
+    )
+    assert report.entity_sov == 0.5
+    assert report.competitor_sov == {"Semrush": 1.0}
+    assert report.relative_sov == 0.333
 
 
 @pytest.mark.asyncio

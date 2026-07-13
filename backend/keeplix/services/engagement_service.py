@@ -80,6 +80,7 @@ async def run_engagement(req: EngagementRequest, session: Session) -> Engagement
             brand_name=req.brand_name,
             aliases=req.aliases,
             brand_domains=req.brand_domains,
+            competitors=req.competitors,
             samples=samples,
             project_id=req.project_id,
             cycle_id=cycle.id if cycle else None,
@@ -185,6 +186,7 @@ async def run_engagement(req: EngagementRequest, session: Session) -> Engagement
             "brand_name": req.brand_name,
             "aliases": req.aliases or [],
             "brand_domains": req.brand_domains or [],
+            "competitors": req.competitors or [],
         }
         cycle.baseline_summary = {
             "captured_at": datetime.now(UTC).isoformat(),

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { api, type CitationEvidence, type ProjectActivity, type ProjectDashboard, type VisibilitySnapshot } from "@/lib/api";
+import { api, type CitationEvidence, type EngineInfo, type ProjectActivity, type ProjectDashboard, type VisibilitySnapshot } from "@/lib/api";
 
 const ACTIVITY_LABEL: Record<string, string> = {
   audit: "网站审计",
@@ -18,6 +18,8 @@ const CADENCE_LABEL: Record<string, string> = {
 };
 const STAGE_LABEL: Record<string, string> = { baseline: "建立基线", improve: "制定优化", execute: "执行中", verify: "等待复测", complete: "已完成" };
 const ASSESSMENT_LABEL: Record<string, string> = { improved: "明确提升", declined: "明确下降", unchanged: "无变化", uncertain: "暂不能判断" };
+const INTENT_LABEL: Record<string, string> = { branded: "品牌", category: "品类", problem: "问题", comparison: "比较" };
+const QUALITY_LABEL: Record<string, string> = { comprehensive: "覆盖完整", balanced: "覆盖较均衡", limited: "覆盖有限" };
 
 function percent(value: number) { return `${Math.round(value * 100)}%`; }
 function confidenceRange(low: number | null, high: number | null) {
@@ -49,6 +51,15 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
   const [agentBusy, setAgentBusy] = useState(false);
   const [agentError, setAgentError] = useState<string | null>(null);
   const [agentConfig, setAgentConfig] = useState({ maxActions: 3, perRunBudget: 0.25, monthlyBudget: 5, autoPlanOnTracking: false });
+  const [editingPromptSetId, setEditingPromptSetId] = useState<string | null>(null);
+  const [promptSetDraft, setPromptSetDraft] = useState({ name: "", prompts: "" });
+  const [promptSetBusy, setPromptSetBusy] = useState(false);
+  const [promptSetError, setPromptSetError] = useState<string | null>(null);
+  const [availableEngines, setAvailableEngines] = useState<EngineInfo[]>([]);
+  const [showTrackingComposer, setShowTrackingComposer] = useState(false);
+  const [trackingDraft, setTrackingDraft] = useState({ promptSetId: "", engineIds: ["qwen"], samples: 3, cadence: "weekly" });
+  const [creatingDiagnosisId, setCreatingDiagnosisId] = useState<string | null>(null);
+  const [diagnosisError, setDiagnosisError] = useState<string | null>(null);
 
   useEffect(() => {
     void params.then(({ id }) => api.project(id).then(setDashboard).catch((reason: unknown) => {
@@ -65,6 +76,17 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
       autoPlanOnTracking: dashboard.agent_policy.auto_plan_on_tracking,
     });
   }, [dashboard?.agent_policy]);
+
+  useEffect(() => {
+    void api.engines().then((items) => {
+      const eligible = items.filter((item) => item.report_eligible);
+      setAvailableEngines(eligible);
+      setTrackingDraft((current) => {
+        const retained = current.engineIds.filter((id) => eligible.some((item) => item.id === id));
+        return { ...current, engineIds: retained.length ? retained : eligible.slice(0, 1).map((item) => item.id) };
+      });
+    }).catch(() => setAvailableEngines([]));
+  }, []);
 
   if (error) return <div className="project-shell"><div className="error-banner" role="alert"><strong>项目无法打开</strong><p>{error}</p><Link href="/projects">返回项目列表</Link></div></div>;
   if (!dashboard) return <div className="project-shell"><div className="projects-loading">正在读取项目状态…</div></div>;
@@ -83,6 +105,17 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
   async function updateWork(itemId: string, status: "open" | "in_progress" | "review" | "done") {
     const updated = await api.updateWorkItem(dashboard!.id, itemId, { status });
     setDashboard((current) => current ? { ...current, work_items: current.work_items.map((item) => item.id === updated.id ? updated : item) } : current);
+  }
+
+  async function createWorkFromDiagnosis(diagnosisId: string) {
+    setCreatingDiagnosisId(diagnosisId); setDiagnosisError(null);
+    try {
+      await api.createWorkItemFromDiagnosis(dashboardId, diagnosisId);
+      await refreshProject();
+      window.location.hash = "work";
+    } catch (reason) {
+      setDiagnosisError(reason instanceof Error ? reason.message : "无法基于这条诊断创建优化工作。");
+    } finally { setCreatingDiagnosisId(null); }
   }
 
   async function verifyCycle() {
@@ -104,6 +137,24 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
     } catch (reason) {
       setTrackingError(reason instanceof Error ? reason.message : "追踪计划未能完成。");
     } finally { setRunningPlanId(null); }
+  }
+
+  function openTrackingComposer(promptSetId?: string) {
+    const activePromptSet = dashboard?.prompt_sets.find((item) => item.active);
+    setTrackingDraft((current) => ({ ...current, promptSetId: promptSetId ?? activePromptSet?.id ?? current.promptSetId }));
+    setTrackingError(null);
+    setShowTrackingComposer(true);
+  }
+
+  async function createTrackingPlan() {
+    if (!trackingDraft.promptSetId || !trackingDraft.engineIds.length) { setTrackingError("请选择当前问题集和至少一个正式答案面。"); return; }
+    setRunningPlanId("creating"); setTrackingError(null);
+    try {
+      await api.createTrackingPlan(dashboardId, { prompt_set_id: trackingDraft.promptSetId, engine_ids: trackingDraft.engineIds, samples: trackingDraft.samples, cadence: trackingDraft.cadence });
+      await refreshProject();
+      setShowTrackingComposer(false);
+    } catch (reason) { setTrackingError(reason instanceof Error ? reason.message : "追踪计划创建失败。"); }
+    finally { setRunningPlanId(null); }
   }
 
   async function refreshProject() { setDashboard(await api.project(dashboardId)); }
@@ -151,6 +202,25 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
     finally { setAgentBusy(false); }
   }
 
+  function beginPromptSetVersion(promptSet: ProjectDashboard["prompt_sets"][number]) {
+    setEditingPromptSetId(promptSet.id);
+    setPromptSetDraft({ name: promptSet.name, prompts: promptSet.prompts.join("\n") });
+    setPromptSetError(null);
+  }
+
+  async function savePromptSetVersion() {
+    if (!editingPromptSetId) return;
+    const prompts = promptSetDraft.prompts.split("\n").map((item) => item.trim()).filter(Boolean);
+    if (!prompts.length) { setPromptSetError("至少保留一个问题。"); return; }
+    setPromptSetBusy(true); setPromptSetError(null);
+    try {
+      await api.createPromptSetVersion(dashboardId, editingPromptSetId, { name: promptSetDraft.name.trim() || undefined, prompts });
+      await refreshProject();
+      setEditingPromptSetId(null);
+    } catch (reason) { setPromptSetError(reason instanceof Error ? reason.message : "新版本保存失败。"); }
+    finally { setPromptSetBusy(false); }
+  }
+
   return <div className="project-shell">
     <div className="project-breadcrumb"><Link href="/projects">项目</Link><span>/</span><span>{dashboard.name}</span></div>
 
@@ -159,7 +229,7 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
       <div className="project-header-actions"><Link href={auditHref}>运行网站审计</Link><Link className="project-primary-action" href={trackHref}>运行可见度检测 <span>→</span></Link></div>
     </header>
 
-    <nav className="project-nav" aria-label="项目导航"><a className="is-active" href="#overview">概览</a><a href="#visibility">可见度</a><a href="#tracking">追踪计划</a><a href="#work">优化工作</a><a href="#agent">Agent</a><a href="#activity">活动</a></nav>
+    <nav className="project-nav" aria-label="项目导航"><a className="is-active" href="#overview">概览</a><a href="#visibility">可见度</a><a href="#diagnosis">诊断</a><a href="#questions">问题集</a><a href="#tracking">追踪计划</a><a href="#work">优化工作</a><a href="#agent">Agent</a><a href="#activity">活动</a></nav>
 
     <main id="overview" className="project-main">
       <section className="project-overview-grid">
@@ -169,12 +239,19 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
           <div className="state-metrics"><div><span>品牌提及率</span><b>{latestByEngine[0] ? percent(latestByEngine[0].entity_sov) : "—"}</b></div><div><span>自有域名引用率</span><b>{latestByEngine[0] ? percent(latestByEngine[0].citation_sov) : "—"}</b></div><div><span>正式答案面</span><b>{latestByEngine.length}</b></div></div>
         </article>
 
-        <aside className="next-action-card"><span>{currentCycle ? `当前周期 · ${STAGE_LABEL[currentCycle.stage] ?? currentCycle.stage}` : "建议下一步"}</span><h2>{currentWork.length ? `${currentWork.filter((item) => item.status !== "done").length} 项工作待推进` : latestByEngine.length ? "建立第一个优化周期" : "完成项目基线"}</h2><p>{currentCycle ? currentCycle.objective : "将审计、真实答案面、优化执行和复测放进同一个可验证周期。"}</p><Link href={currentWork.length ? "#work" : `/optimize?url=${encodeURIComponent(`https://${dashboard.primary_domain}`)}&brand=${encodeURIComponent(dashboard.name)}&project=${dashboard.id}`}>{currentWork.length ? "查看优化工作" : "启动优化周期"}<span>→</span></Link></aside>
+        <aside className="next-action-card"><span>{currentCycle ? `当前周期 · ${STAGE_LABEL[currentCycle.stage] ?? currentCycle.stage}` : "建议下一步"}</span><h2>{dashboard.diagnosis.insights.length ? "先审查证据诊断" : currentWork.length ? `${currentWork.filter((item) => item.status !== "done").length} 项工作待推进` : latestByEngine.length ? "建立第一个优化周期" : "完成项目基线"}</h2><p>{dashboard.diagnosis.insights.length ? "先确认每个缺口对应的问题、答案面和来源证据，再决定是否进入优化工作。" : currentCycle ? currentCycle.objective : "将审计、真实答案面、优化执行和复测放进同一个可验证周期。"}</p><Link href={dashboard.diagnosis.insights.length ? "#diagnosis" : currentWork.length ? "#work" : latestByEngine.length ? `/optimize?url=${encodeURIComponent(`https://${dashboard.primary_domain}`)}&brand=${encodeURIComponent(dashboard.name)}&project=${dashboard.id}` : trackHref}>{dashboard.diagnosis.insights.length ? "查看诊断依据" : currentWork.length ? "查看优化工作" : latestByEngine.length ? "启动优化周期" : "运行第一次检测"}<span>→</span></Link></aside>
       </section>
 
       <section id="visibility" className="project-section">
         <div className="project-section-head"><div><span>AI 可见度</span><h2>当前答案面表现</h2></div><p>基于每个引擎最近一次成功检测。</p></div>
-        {latestByEngine.length ? <div className="visibility-summary-table"><div className="table-head"><span>引擎</span><span>品牌提及</span><span>域名引用</span><span>平均位置</span><span>样本</span></div>{latestByEngine.map((item) => <div className="table-row" key={item.engine_id}><strong>{item.engine_id}</strong><span>{percent(item.entity_sov)}{confidenceRange(item.entity_ci_low, item.entity_ci_high) && <small>{confidenceRange(item.entity_ci_low, item.entity_ci_high)}</small>}</span><span>{percent(item.citation_sov)}{confidenceRange(item.citation_ci_low, item.citation_ci_high) && <small>{confidenceRange(item.citation_ci_low, item.citation_ci_high)}</small>}</span><span>{item.avg_rank ?? "—"}</span><span>{item.sample_size}</span></div>)}</div> : <div className="project-empty"><p>还没有可见度数据。</p><Link href={trackHref}>运行第一次检测 →</Link></div>}
+        {latestByEngine.length ? <div className="visibility-summary-table"><div className="table-head"><span>答案面</span><span>品牌提及</span><span>域名引用</span><span>相对份额</span><span>样本</span></div>{latestByEngine.map((item) => <div className="table-row" key={item.engine_id}><strong>{item.surface_name || item.engine_id}</strong><span>{percent(item.entity_sov)}{confidenceRange(item.entity_ci_low, item.entity_ci_high) && <small>{confidenceRange(item.entity_ci_low, item.entity_ci_high)}</small>}</span><span>{percent(item.citation_sov)}{confidenceRange(item.citation_ci_low, item.citation_ci_high) && <small>{confidenceRange(item.citation_ci_low, item.citation_ci_high)}</small>}</span><span>{item.relative_sov === null ? "—" : percent(item.relative_sov)}{Object.entries(item.competitor_sov).map(([name, value]) => <small key={name}>{name} {percent(value)}</small>)}</span><span>{item.sample_size}</span></div>)}</div> : <div className="project-empty"><p>还没有正式可见度数据。运行一次已验收答案面检测后建立基线。</p><Link href={trackHref}>运行第一次检测 →</Link></div>}
+      </section>
+
+      <section id="diagnosis" className="project-section diagnosis-section">
+        <div className="project-section-head"><div><span>证据诊断</span><h2>结果背后的具体缺口</h2></div><p>仅使用已认证答案面的原始样本；这是判断依据，不会自动替你创建或发布优化任务。</p></div>
+        {dashboard.diagnosis.insights.length ? <><div className="diagnosis-meta"><span>{dashboard.diagnosis.qualified_run_count} 次正式检测 · {dashboard.diagnosis.qualified_sample_count} 个样本</span><b>{QUALITY_LABEL[dashboard.diagnosis.coverage_status] ?? "当前范围"}</b></div><div className="diagnosis-list">{dashboard.diagnosis.insights.map((insight) => <article key={insight.id} className={`diagnosis-card priority-${insight.priority}`}><header><span>{insight.priority === "high" ? "优先处理" : "需要复核"}</span><div><b>{insight.engine_id}</b><small>{INTENT_LABEL[insight.prompt_intent] ?? insight.prompt_intent}问题 · {insight.sample_size} 个样本</small></div></header><h3>{insight.title}</h3><p className="diagnosis-question">{insight.prompt_text}</p><p>{insight.detail}</p><div className="diagnosis-facts"><span>品牌 {insight.brand_mentions}/{insight.sample_size}</span><span>自有域名引用 {insight.own_domain_citations}/{insight.sample_size}</span>{Object.entries(insight.competitor_mentions).map(([name, count]) => <span key={name}>{name} {count}/{insight.sample_size}</span>)}</div><details><summary>查看依据 <span>↓</span></summary><div className="diagnosis-evidence">{insight.cited_urls.length ? <ul>{insight.cited_urls.map((url) => <li key={url}><a href={url} target="_blank" rel="noreferrer">{url}</a></li>)}</ul> : <p>该答案没有返回可访问来源链接；可到下方活动记录查看原始回答。</p>}<a href="#activity">在项目活动中查看原始回答 →</a></div></details><button className="diagnosis-create-work" type="button" onClick={() => void createWorkFromDiagnosis(insight.id)} disabled={creatingDiagnosisId !== null}>{creatingDiagnosisId === insight.id ? "正在建立工作…" : "基于此证据建立优化工作 →"}</button></article>)}</div></> : <div className="project-empty"><p>{dashboard.diagnosis.warnings[0] ?? "当前没有需要提示的正式样本缺口。"}</p>{latestByEngine.length ? <a href="#activity">查看本次原始证据 →</a> : <Link href={trackHref}>运行已认证答案面检测 →</Link>}</div>}
+        {dashboard.diagnosis.warnings.length > 0 && <div className="diagnosis-warnings">{dashboard.diagnosis.warnings.map((warning) => <p key={warning}>{warning}</p>)}</div>}
+        {diagnosisError && <p className="cycle-action-error" role="alert">{diagnosisError}</p>}
       </section>
 
       <section id="work" className="project-section">
@@ -188,9 +265,16 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
         {actionError && <p className="cycle-action-error" role="alert">{actionError}</p>}
       </section>}
 
+      <section id="questions" className="project-section prompt-set-section">
+        <div className="project-section-head"><div><span>测量问题集</span><h2>问题范围是可版本化资产</h2></div><p>每次编辑都会创建新版本；已有追踪计划继续锁定原问题，历史趋势不会被改写。</p></div>
+        {dashboard.prompt_sets.length ? <div className="prompt-set-list">{dashboard.prompt_sets.map((promptSet) => <article key={promptSet.id} data-prompt-set-id={promptSet.id} className={`prompt-set-card${promptSet.active ? " is-active" : ""}`}><header><div><span>{promptSet.active ? "当前版本" : "历史版本"}</span><h3>{promptSet.name} <small>v{promptSet.version}</small></h3></div><div className="prompt-card-actions"><button type="button" onClick={() => beginPromptSetVersion(promptSet)} disabled={promptSetBusy}>基于此版本编辑</button>{promptSet.active && <button data-testid={`track-prompt-set-${promptSet.id}`} type="button" onClick={() => openTrackingComposer(promptSet.id)}>用于追踪计划</button>}</div></header><div className="prompt-intent-coverage">{Object.entries(promptSet.measurement_quality.coverage).map(([intent, count]) => <span className={count > 0 ? "is-covered" : ""} key={intent}>{INTENT_LABEL[intent] ?? intent} {count}</span>)}</div><ol>{promptSet.prompt_items.map((item) => <li key={item.id}><b>{INTENT_LABEL[item.intent]}</b><span>{item.text}</span></li>)}</ol>{promptSet.measurement_quality.warnings.length > 0 && <p className="measurement-warning">{promptSet.measurement_quality.warnings.join("；")}</p>}</article>)}</div> : <div className="project-empty"><p>尚未保存问题集。</p><Link href={trackHref}>先建立第一组测量问题 →</Link></div>}
+        {editingPromptSetId && <div className="prompt-set-editor"><div><span>创建新版本</span><strong>历史版本不会被修改</strong></div><label><span>问题集名称</span><input value={promptSetDraft.name} onChange={(event) => setPromptSetDraft((current) => ({ ...current, name: event.target.value }))} /></label><label><span>问题（每行一个）</span><textarea value={promptSetDraft.prompts} onChange={(event) => setPromptSetDraft((current) => ({ ...current, prompts: event.target.value }))} /></label><footer><button type="button" onClick={() => setEditingPromptSetId(null)} disabled={promptSetBusy}>取消</button><button className="agent-primary-button" type="button" onClick={() => void savePromptSetVersion()} disabled={promptSetBusy}>{promptSetBusy ? "正在保存…" : "保存为新版本"}</button></footer>{promptSetError && <p className="cycle-action-error" role="alert">{promptSetError}</p>}</div>}
+      </section>
+
       <section id="tracking" className="project-section">
-        <div className="project-section-head"><div><span>追踪计划</span><h2>持续观测范围</h2></div><p>基于保存的问题集、引擎和频率，形成可复测的观测范围。</p></div>
-        {dashboard.tracking_plans.length ? <div className="tracking-plan-list">{dashboard.tracking_plans.map((plan) => { const trends = planTrend(dashboard.visibility, plan.id); return <article key={plan.id} className="tracking-plan-row"><div><span>{CADENCE_LABEL[plan.cadence] ?? plan.cadence}</span><h3>{plan.prompt_set_name}</h3><p>{plan.question_count} 个问题 · {plan.engine_ids.join("、")} · 每题 {plan.samples} 次</p>{trends.length > 0 && <div className="tracking-mini-trend">{trends.map(({ engineId, latest, previous }) => <span key={engineId}><b>{engineId}</b>{percent(latest.entity_sov)}{previous ? <small className={latest.entity_sov >= previous.entity_sov ? "trend-up" : "trend-down"}>{signedPercent(latest.entity_sov - previous.entity_sov)}</small> : <small>首次基线</small>}</span>)}</div>}</div><div><b>{plan.last_error ? `运行异常 · ${plan.consecutive_failures}` : plan.status === "active" ? "运行中" : plan.status}</b><small>{plan.last_run_at ? `上次 ${formatTime(plan.last_run_at)}` : "尚未自动执行"}</small><small>{plan.next_run_at ? `下次 ${formatTime(plan.next_run_at)}` : "手动计划"}</small><button type="button" onClick={() => void runTrackingPlan(plan.id)} disabled={runningPlanId !== null}>{runningPlanId === plan.id ? "正在运行…" : "立即运行"}</button></div></article>; })}</div> : <div className="project-empty"><p>还没有持续追踪计划。</p><Link href={trackHref}>保存第一组追踪问题 →</Link></div>}
+        <div className="project-section-head"><div><span>追踪计划</span><h2>持续观测范围</h2></div><div><p>基于保存的问题集、引擎和频率，形成可复测的观测范围。</p>{dashboard.prompt_sets.some((item) => item.active) && <button className="tracking-create-button" type="button" onClick={() => openTrackingComposer()}>新建追踪计划</button>}</div></div>
+        {showTrackingComposer && <div className="tracking-composer"><label><span>当前问题集</span><select value={trackingDraft.promptSetId} onChange={(event) => setTrackingDraft((current) => ({ ...current, promptSetId: event.target.value }))}>{dashboard.prompt_sets.filter((item) => item.active).map((item) => <option key={item.id} value={item.id}>{item.name} · v{item.version}</option>)}</select></label><label><span>采样次数</span><input type="number" min={1} max={20} value={trackingDraft.samples} onChange={(event) => setTrackingDraft((current) => ({ ...current, samples: Number(event.target.value) || 1 }))} /></label><label><span>频率</span><select value={trackingDraft.cadence} onChange={(event) => setTrackingDraft((current) => ({ ...current, cadence: event.target.value }))}><option value="weekly">每周</option><option value="daily">每日</option><option value="monthly">每月</option><option value="manual">手动</option></select></label><fieldset><legend>正式答案面</legend>{availableEngines.map((engine) => <label key={engine.id}><input type="checkbox" checked={trackingDraft.engineIds.includes(engine.id)} onChange={(event) => setTrackingDraft((current) => ({ ...current, engineIds: event.target.checked ? [...current.engineIds, engine.id] : current.engineIds.filter((id) => id !== engine.id) }))} />{engine.display_name}</label>)}</fieldset><footer><button type="button" onClick={() => setShowTrackingComposer(false)} disabled={runningPlanId === "creating"}>取消</button><button className="agent-primary-button" type="button" onClick={() => void createTrackingPlan()} disabled={runningPlanId === "creating"}>{runningPlanId === "creating" ? "正在创建…" : "保存追踪计划"}</button></footer></div>}
+        {dashboard.tracking_plans.length ? <div className="tracking-plan-list">{dashboard.tracking_plans.map((plan) => { const trends = planTrend(dashboard.visibility, plan.id); return <article key={plan.id} className="tracking-plan-row"><div><span>{CADENCE_LABEL[plan.cadence] ?? plan.cadence} · {QUALITY_LABEL[plan.measurement_quality.status] ?? plan.measurement_quality.status}</span><h3>{plan.prompt_set_name}</h3><p>{plan.question_count} 个问题 · {plan.engine_ids.join("、")} · 每题 {plan.samples} 次</p><div className="prompt-intent-coverage">{Object.entries(plan.measurement_quality.coverage).map(([intent, count]) => <span className={count > 0 ? "is-covered" : ""} key={intent}>{INTENT_LABEL[intent] ?? intent} {count}</span>)}</div>{plan.measurement_quality.warnings.length > 0 && <p className="measurement-warning">{plan.measurement_quality.warnings.join("；")}</p>}{trends.length > 0 && <div className="tracking-mini-trend">{trends.map(({ engineId, latest, previous }) => <span key={engineId}><b>{engineId}</b>{percent(latest.entity_sov)}{previous ? <small className={latest.entity_sov >= previous.entity_sov ? "trend-up" : "trend-down"}>{signedPercent(latest.entity_sov - previous.entity_sov)}</small> : <small>首次基线</small>}</span>)}</div>}</div><div><b>{plan.last_error ? `运行异常 · ${plan.consecutive_failures}` : plan.status === "active" ? "运行中" : plan.status}</b><small>{plan.last_run_at ? `上次 ${formatTime(plan.last_run_at)}` : "尚未自动执行"}</small><small>{plan.next_run_at ? `下次 ${formatTime(plan.next_run_at)}` : "手动计划"}</small><button type="button" onClick={() => void runTrackingPlan(plan.id)} disabled={runningPlanId !== null}>{runningPlanId === plan.id ? "正在运行…" : "立即运行"}</button></div></article>; })}</div> : <div className="project-empty"><p>还没有持续追踪计划。</p><Link href={trackHref}>保存第一组追踪问题 →</Link></div>}
         {trackingError && <p className="cycle-action-error" role="alert">{trackingError}</p>}
       </section>
 
