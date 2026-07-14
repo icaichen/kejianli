@@ -34,6 +34,17 @@ def list_known_engines() -> dict[str, str]:
     return dict(KNOWN_ENGINES)
 
 
+def _build_qwen(settings: Settings) -> EngineProvider | None:
+    api_key = settings.dashscope_api_key or settings.qwen_api_key
+    if not api_key or not settings.qwen_search_agent_id:
+        return None
+    return QwenWebSearchProvider(
+        api_key,
+        settings.qwen_search_agent_id,
+        settings.qwen_search_agent_version,
+    )
+
+
 # 有 key 时构造真实 provider 的逻辑；返回 None 表示无 key → 回退 stub。
 _REAL_BUILDERS: dict[str, Callable[[Settings], EngineProvider | None]] = {
     "deepseek": lambda s: (
@@ -41,15 +52,7 @@ _REAL_BUILDERS: dict[str, Callable[[Settings], EngineProvider | None]] = {
         if s.deepseek_api_key
         else None
     ),
-    "qwen": lambda s: (
-        QwenWebSearchProvider(
-            s.dashscope_api_key or s.qwen_api_key,
-            s.qwen_search_agent_id,
-            s.qwen_search_agent_version,
-        )
-        if (s.dashscope_api_key or s.qwen_api_key) and s.qwen_search_agent_id
-        else None
-    ),
+    "qwen": _build_qwen,
     "kimi": lambda s: (
         KimiWebSearchProvider(s.kimi_api_key, s.kimi_base_url, s.kimi_model)
         if s.kimi_api_key

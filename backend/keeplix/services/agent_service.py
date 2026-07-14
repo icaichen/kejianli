@@ -106,7 +106,9 @@ def _run_dto(run: AgentRun, session: Session) -> AgentRunDTO:
         {
             item.id: item
             for item in session.exec(
-                select(WorkItem).where(WorkItem.id.in_([action.work_item_id for action in actions]))
+                select(WorkItem).where(
+                    col(WorkItem.id).in_([action.work_item_id for action in actions])
+                )
             ).all()
         }
         if actions
@@ -175,7 +177,7 @@ def plan_agent_run(
     work_items = session.exec(
         select(WorkItem).where(
             WorkItem.cycle_id == cycle.id,
-            WorkItem.status.not_in({"done", "dismissed"}),
+            col(WorkItem.status).not_in({"done", "dismissed"}),
         )
     ).all()
     work_items = sorted(
@@ -187,8 +189,8 @@ def plan_agent_run(
             select(OptimizationArtifact)
             .where(
                 OptimizationArtifact.work_item_id == item.id,
-                OptimizationArtifact.kind.in_({"content", "instructions"}),
-                OptimizationArtifact.status.not_in({"implemented", "superseded"}),
+                col(OptimizationArtifact.kind).in_({"content", "instructions"}),
+                col(OptimizationArtifact.status).not_in({"implemented", "superseded"}),
             )
             .order_by(col(OptimizationArtifact.version).desc())
         ).first()
@@ -343,7 +345,10 @@ async def execute_agent_run(project_id: str, run_id: str, session: Session) -> A
             completed += 1
             continue
         action.status = "running"
-        run = session.get(AgentRun, run.id)
+        refreshed_run = session.get(AgentRun, run.id)
+        if refreshed_run is None:
+            raise RuntimeError("Agent 运行在执行期间被删除")
+        run = refreshed_run
         run.heartbeat_at = datetime.now(UTC)
         session.add(run)
         session.add(action)
@@ -416,7 +421,10 @@ async def execute_agent_run(project_id: str, run_id: str, session: Session) -> A
                 session.commit()
             errors[action.id] = type(error).__name__
 
-    run = session.get(AgentRun, run.id)
+    refreshed_run = session.get(AgentRun, run.id)
+    if refreshed_run is None:
+        raise RuntimeError("Agent 运行在执行期间被删除")
+    run = refreshed_run
     retryable = bool(errors) and run.attempt_count < run.max_attempts
     if retryable:
         run.status = "retry_scheduled"
@@ -463,7 +471,9 @@ def maybe_plan_from_tracking(
         select(AgentRun).where(
             AgentRun.project_id == project_id,
             AgentRun.cycle_id == cycle_id,
-            AgentRun.status.in_({"awaiting_approval", "approved", "running", "retry_scheduled"}),
+            col(AgentRun.status).in_(
+                {"awaiting_approval", "approved", "running", "retry_scheduled"}
+            ),
         )
     ).first()
     if existing:
@@ -483,7 +493,11 @@ async def run_due_agent_runs(session: Session) -> list[AgentRunDTO]:
     now = datetime.now(UTC)
     stale_before = now - timedelta(minutes=10)
     stale = session.exec(
-        select(AgentRun).where(AgentRun.status == "running", AgentRun.heartbeat_at < stale_before)
+        select(AgentRun).where(
+            AgentRun.status == "running",
+            col(AgentRun.heartbeat_at).is_not(None),
+            col(AgentRun.heartbeat_at) < stale_before,
+        )
     ).all()
     for run in stale:
         run.status = "retry_scheduled"
@@ -493,7 +507,7 @@ async def run_due_agent_runs(session: Session) -> list[AgentRunDTO]:
     due = session.exec(
         select(AgentRun).where(
             AgentRun.status == "retry_scheduled",
-            (AgentRun.next_attempt_at.is_(None)) | (AgentRun.next_attempt_at <= now),
+            col(AgentRun.next_attempt_at).is_(None) | (col(AgentRun.next_attempt_at) <= now),
         )
     ).all()
     results = []

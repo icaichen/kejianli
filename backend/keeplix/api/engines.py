@@ -8,6 +8,7 @@ from sqlmodel import Session
 
 from keeplix.core.db import get_session
 from keeplix.providers import get_provider, list_known_engines
+from keeplix.services.engine_runtime_service import get_runtime_status
 from keeplix.services.qualification_service import (
     get_qualification,
     is_formally_eligible,
@@ -32,6 +33,11 @@ class EngineInfo(BaseModel):
     last_validated_at: str | None
     validation_notes: str
     cost_note: str
+    runtime_status: str
+    last_success_at: str | None
+    last_failure_at: str | None
+    last_observed_at: str | None
+    last_error: str
 
 
 @router.get("/engines", response_model=list[EngineInfo])
@@ -42,6 +48,14 @@ def index(session: Session = Depends(get_session)) -> list[EngineInfo]:
         acquisition = str(getattr(provider, "acquisition", "stub"))
         measurement_scope = str(getattr(provider, "measurement_scope", "stub"))
         qualification = get_qualification(engine_id, session)
+        runtime = get_runtime_status(engine_id, session)
+        runtime_status = (
+            "not_connected"
+            if acquisition == "stub"
+            else runtime.status
+            if runtime
+            else "unknown"
+        )
         out.append(
             EngineInfo(
                 id=engine_id,
@@ -63,6 +77,23 @@ def index(session: Session = Depends(get_session)) -> list[EngineInfo]:
                 ),
                 validation_notes=qualification.validation_notes,
                 cost_note=qualification.cost_note,
+                runtime_status=runtime_status,
+                last_success_at=(
+                    runtime.last_success_at.isoformat()
+                    if runtime and runtime.last_success_at
+                    else None
+                ),
+                last_failure_at=(
+                    runtime.last_failure_at.isoformat()
+                    if runtime and runtime.last_failure_at
+                    else None
+                ),
+                last_observed_at=(
+                    runtime.last_observed_at.isoformat()
+                    if runtime and runtime.last_observed_at
+                    else None
+                ),
+                last_error=runtime.last_error if runtime else "",
             )
         )
     return out

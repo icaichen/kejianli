@@ -261,6 +261,19 @@ class EngineQualification(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=_now)
 
 
+class EngineRuntimeStatus(SQLModel, table=True):
+    """Latest observed runtime health for one provider integration."""
+
+    __tablename__ = "engine_runtime_status"
+    engine_id: str = Field(foreign_key="engine.id", primary_key=True)
+    status: str = "unknown"  # unknown | ready | degraded | not_connected
+    last_success_at: datetime | None = None
+    last_failure_at: datetime | None = None
+    last_error: str = ""
+    last_observed_at: datetime | None = None
+    updated_at: datetime = Field(default_factory=_now)
+
+
 # --------------------------------------------------------------------------- #
 # Prompt 集
 # --------------------------------------------------------------------------- #

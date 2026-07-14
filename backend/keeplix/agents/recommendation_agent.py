@@ -156,7 +156,8 @@ async def _generate_content(
         return None  # 无 key 时不生成
 
     prompts = {
-        "direct_answer_lead": f"""你是 GEO 优化专家。请为网站 {url}（品牌：{brand_name}）生成一段 40-200 字的"首段直答"。
+        "direct_answer_lead": "你是 GEO 优化专家。"
+        f"""请为网站 {url}（品牌：{brand_name}）生成一段 40-200 字的"首段直答"。
 要求：
 - 开门见山回答用户核心问题（"这是什么？""能帮我什么？"）
 - 语气专业、简洁，适合被 AI 引用
@@ -165,7 +166,8 @@ async def _generate_content(
 当前首段：{first_para or "（无）"}
 
 请直接输出优化后的首段，不要加解释。""",
-        "faq_coverage": f"""你是 GEO 优化专家。请为网站 {url}（品牌：{brand_name}）生成 3-5 个常见问题（FAQ）。
+        "faq_coverage": "你是 GEO 优化专家。"
+        f"""请为网站 {url}（品牌：{brand_name}）生成 3-5 个常见问题（FAQ）。
 要求：
 - 问题要具体、用户会真实搜索
 - 答案要直接、40-80 字
@@ -179,7 +181,8 @@ Q: 问题2
 A: 答案2
 
 请直接输出，不要加解释。""",
-        "has_author": f"""你是 GEO 优化专家。请为网站 {url}（品牌：{brand_name}）生成一段作者介绍（author bio）。
+        "has_author": "你是 GEO 优化专家。"
+        f"""请为网站 {url}（品牌：{brand_name}）生成一段作者介绍（author bio）。
 要求：
 - 50-100 字
 - 突出专业资质、经验

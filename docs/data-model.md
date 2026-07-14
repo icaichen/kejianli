@@ -16,6 +16,8 @@ Organization (agency, 多租户预留)
                  └─< Deliverable       (客户交付报告)
 
 Engine (引擎目录, 全局配置表: acquisition / source_preferences)
+   ├── EngineQualification (人工验收与正式报告资格)
+   └── EngineRuntimeStatus (真实 Provider 最近连通状态)
 ```
 
 ## 表定义
@@ -63,6 +65,16 @@ agency 服务的客户。
 
 ### EngineQualification（答案面资格矩阵）
 同一模型名称不等于同一产品答案面。本表记录具体答案面的联网状态、采集方式、地区语言、引用可得性、人工验收状态与正式报告资格。运行时还会校验当前 Provider 是否真实连接且能力与验收记录一致；两者同时成立才可写入正式可见度趋势。
+
+### EngineRuntimeStatus（真实 Provider 运行状态）
+记录每个真实 Provider 最近一次调用的成功或失败结果，供 `/api/engines` 和 UI 展示当前连通性。Stub 调用不写入本表，避免无 key 的演示运行被误报为真实接入成功。
+| engine_id | str PK, FK→Engine | 引擎 id |
+| status | str | `unknown` / `ready` / `degraded` |
+| last_success_at | datetime? | 最近真实调用成功时间 |
+| last_failure_at | datetime? | 最近真实调用失败时间 |
+| last_error | str | 最近失败的安全摘要 |
+| last_observed_at | datetime? | 最近真实调用观测时间 |
+| updated_at | datetime | 状态行更新时间 |
 
 ### Prompt
 采样查询。prompt 集的质量 = 测量质量。

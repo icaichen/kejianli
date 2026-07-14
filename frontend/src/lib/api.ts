@@ -413,6 +413,11 @@ export interface EngineInfo {
   last_validated_at: string | null;
   validation_notes: string;
   cost_note: string;
+  runtime_status: "unknown" | "ready" | "degraded" | "not_connected";
+  last_success_at: string | null;
+  last_failure_at: string | null;
+  last_observed_at: string | null;
+  last_error: string;
 }
 
 async function post<T>(path: string, body: unknown): Promise<T> {

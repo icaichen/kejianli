@@ -59,6 +59,11 @@ def test_citations_run_with_stub(client):
         assert r["sample_size"] == 6
         assert 0.0 <= r["entity_sov"] <= 1.0
         assert r["entity_ci_low"] <= r["entity_sov"] <= r["entity_ci_high"]
+    engines = {engine["id"]: engine for engine in client.get("/api/engines").json()}
+    assert engines["deepseek"]["runtime_status"] == "not_connected"
+    assert engines["deepseek"]["last_observed_at"] is None
+    assert engines["kimi"]["runtime_status"] == "not_connected"
+    assert engines["kimi"]["last_observed_at"] is None
 
 
 def test_citations_keep_successful_engines_when_one_provider_fails(
@@ -215,7 +220,9 @@ def test_competitor_benchmark_is_returned_and_persisted(client, _qualified_citat
     assert tracked["results"][0]["competitor_sov"] == {"GEO": 1.0}
 
 
-def test_project_diagnosis_uses_only_qualified_answer_evidence(client, _qualified_citation_provider):
+def test_project_diagnosis_uses_only_qualified_answer_evidence(
+    client, _qualified_citation_provider
+):
     project = client.post(
         "/api/projects", json={"name": "诊断证据", "primary_domain": "keeplix.com"}
     ).json()
@@ -487,6 +494,8 @@ def test_engines_list_marks_stub(client):
     assert engines["qwen"]["region_language"] == "zh-CN"
     assert engines["qwen"]["auth_mode"] == "api_key"
     assert engines["qwen"]["cost_note"]
+    assert engines["kimi"]["runtime_status"] == "not_connected"
+    assert engines["kimi"]["last_observed_at"] is None
 
 
 def test_tracking_plan_isolates_engine_failures(client, monkeypatch, _qualified_citation_provider):
@@ -521,3 +530,11 @@ def test_tracking_plan_isolates_engine_failures(client, monkeypatch, _qualified_
     assert execution.json()["status"] == "partial"
     assert execution.json()["errors"] == {"qwen": "RuntimeError"}
     assert [result["engine_id"] for result in execution.json()["results"]] == ["kimi"]
+
+    engines = {engine["id"]: engine for engine in client.get("/api/engines").json()}
+    assert engines["qwen"]["runtime_status"] == "degraded"
+    assert engines["qwen"]["last_error"] == "RuntimeError"
+    assert engines["qwen"]["last_failure_at"] is not None
+    assert engines["kimi"]["runtime_status"] == "ready"
+    assert engines["kimi"]["last_success_at"] is not None
+    assert engines["kimi"]["last_error"] == ""

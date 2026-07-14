@@ -48,6 +48,9 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.ruff.lint.per-file-ignores]
 # FastAPI 的 Depends() 默认参数是官方惯例，B008 在此为误报
 "keeplix/api/*.py" = ["B008"]
+# 历史迁移保持生成时原貌，不为静态检查重写。
+"alembic/env.py" = ["I001"]
+"alembic/versions/*.py" = ["E501", "I001"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -75,3 +75,4 @@ def _qualified_citation_provider(monkeypatch):
 
     monkeypatch.setattr("keeplix.agents.citation_agent.get_provider", provider)
     monkeypatch.setattr("keeplix.services.citation_service.get_provider", provider)
+    monkeypatch.setattr("keeplix.api.engines.get_provider", provider)

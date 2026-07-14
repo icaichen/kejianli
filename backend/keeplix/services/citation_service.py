@@ -19,6 +19,7 @@ from keeplix.models import (
 from keeplix.models.enums import RunStatus, Sentiment
 from keeplix.providers import get_provider
 from keeplix.schemas import CitationRunRequest, CitationRunResponse, SoVEngineResult
+from keeplix.services.engine_runtime_service import mark_engine_failure, mark_engine_success
 from keeplix.services.qualification_service import get_qualification, is_formally_eligible
 
 
@@ -135,12 +136,17 @@ async def run_citations(req: CitationRunRequest, session: Session) -> CitationRu
             )
         except Exception as error:  # one provider must not erase other engines' evidence
             errors[engine_id] = _provider_error(error)
+            if acquisition != "stub":
+                mark_engine_failure(engine_id, errors[engine_id], session)
             if run:
                 run.status = RunStatus.failed
                 run.finished_at = datetime.now(UTC)
                 session.add(run)
                 session.commit()
             continue
+
+        if acquisition != "stub":
+            mark_engine_success(engine_id, session)
 
         if req.project_id and run:
             for sample in report.samples:

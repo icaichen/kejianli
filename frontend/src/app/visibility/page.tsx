@@ -159,11 +159,13 @@ function VisibilityContent() {
           <div>{ALL_ENGINES.map((id) => {
             const engine = engines?.find((item) => item.id === id);
             const eligible = engine?.report_eligible === true;
-            const scopeLabel = eligible ? "正式答案面" : engine?.is_stub ? "当前未连接" : engine?.measurement_scope === "brand_awareness" ? "仅品牌认知" : engine?.validation_status === "pending" ? "待验收" : "不可用于正式报告";
+            const scopeLabel = eligible
+              ? engine?.runtime_status === "degraded" ? "正式答案面 · 最近失败" : "正式答案面"
+              : engine?.is_stub ? "当前未连接" : engine?.measurement_scope === "brand_awareness" ? "仅品牌认知" : engine?.validation_status === "pending" ? "待验收" : "不可用于正式报告";
             return <button key={id} type="button" onClick={() => toggle(id)} aria-pressed={selected.includes(id)} disabled={!eligible} className={`${selected.includes(id) ? "is-selected" : ""}${eligible ? "" : " is-unavailable"}`}><b>{engine?.display_name ?? id}</b><small>{scopeLabel}</small></button>;
           })}</div>
         </div>
-        {engines && <details className="provider-matrix"><summary><span>答案面资格矩阵</span><b>{engines.filter((engine) => engine.report_eligible).length} 个当前可进入正式报告</b><i>↓</i></summary><div className="provider-matrix-table"><div className="provider-matrix-head"><span>答案面</span><span>当前状态</span><span>观测能力</span><span>验收与限制</span></div>{engines.map((engine) => <div className="provider-matrix-row" key={engine.id}><div><strong>{engine.display_name}</strong><small>{engine.surface_name}</small></div><div><b className={engine.report_eligible ? "is-formal" : ""}>{engine.report_eligible ? "正式报告" : engine.is_stub ? "未连接" : engine.measurement_scope === "brand_awareness" ? "仅品牌认知" : "待验收"}</b><small>{engine.acquisition} · {engine.region_language} · {engine.auth_mode}</small></div><div><span>{engine.network_enabled ? "联网答案" : "普通回答"}</span><small>{engine.citation_availability === "structured" ? "结构化来源" : engine.citation_availability === "urls" ? "来源 URL" : "无引用来源"}</small></div><div><p>{engine.validation_notes}</p>{engine.cost_note && <small>{engine.cost_note}</small>}{engine.last_validated_at && <small>最近验收：{new Date(engine.last_validated_at).toLocaleDateString("zh-CN")}</small>}</div></div>)}</div></details>}
+        {engines && <details className="provider-matrix"><summary><span>答案面资格矩阵</span><b>{engines.filter((engine) => engine.report_eligible).length} 个可进入正式报告 · {engines.filter((engine) => engine.runtime_status === "ready").length} 个最近跑通</b><i>↓</i></summary><div className="provider-matrix-table"><div className="provider-matrix-head"><span>答案面</span><span>报告资格</span><span>当前连通性</span><span>观测能力</span><span>验收与限制</span></div>{engines.map((engine) => <div className="provider-matrix-row" key={engine.id}><div><strong>{engine.display_name}</strong><small>{engine.surface_name}</small></div><div><b className={engine.report_eligible ? "is-formal" : ""}>{engine.report_eligible ? "正式报告" : engine.is_stub ? "未连接" : engine.measurement_scope === "brand_awareness" ? "仅品牌认知" : "待验收"}</b><small>{engine.acquisition} · {engine.region_language} · {engine.auth_mode}</small></div><div><b className={engine.runtime_status === "ready" ? "is-formal" : engine.runtime_status === "degraded" ? "is-degraded" : ""}>{runtimeLabel(engine)}</b><small>{runtimeDetail(engine)}</small></div><div><span>{engine.network_enabled ? "联网答案" : "普通回答"}</span><small>{engine.citation_availability === "structured" ? "结构化来源" : engine.citation_availability === "urls" ? "来源 URL" : "无引用来源"}</small></div><div><p>{engine.validation_notes}</p>{engine.cost_note && <small>{engine.cost_note}</small>}{engine.last_validated_at && <small>最近验收：{new Date(engine.last_validated_at).toLocaleDateString("zh-CN")}</small>}</div></div>)}</div></details>}
         <div className="tracking-controls">
           <label><input type="checkbox" checked={saveTrackingPlan} onChange={(event) => setSaveTrackingPlan(event.target.checked)} />保存为追踪计划</label>
           <label><span>频率</span><select value={cadence} onChange={(event) => setCadence(event.target.value)} disabled={!saveTrackingPlan}><option value="manual">手动</option><option value="daily">每日</option><option value="weekly">每周</option><option value="monthly">每月</option></select></label>
@@ -189,6 +191,20 @@ function VisibilityContent() {
 function Bar({ value }: { value: number }) {
   const percent = Math.round(value * 100);
   return <div className="sov-bar"><i style={{ width: `${percent}%` }} /><span>{percent}%</span></div>;
+}
+
+function runtimeLabel(engine: EngineInfo) {
+  if (engine.runtime_status === "ready") return "当前可用";
+  if (engine.runtime_status === "degraded") return "最近失败";
+  if (engine.runtime_status === "not_connected") return "未接入";
+  return "尚未观测";
+}
+
+function runtimeDetail(engine: EngineInfo) {
+  if (engine.runtime_status === "not_connected") return "需要配置 API key 或接入方式";
+  if (engine.runtime_status === "degraded") return engine.last_error || "最近调用未完成";
+  if (engine.last_success_at) return `最近成功：${new Date(engine.last_success_at).toLocaleString("zh-CN")}`;
+  return "还没有真实调用记录";
 }
 
 export default function VisibilityPage() {

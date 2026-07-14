@@ -51,8 +51,8 @@ from keeplix.schemas import (
     TrackingExecutionResponse,
     TrackingPlanCreate,
     TrackingPlanResponse,
-    VisibilitySnapshot,
     VisibilityDiagnosis,
+    VisibilitySnapshot,
     WorkItemDetail,
     WorkItemDTO,
     WorkItemUpdate,
@@ -72,7 +72,7 @@ def _diagnose_visibility(project_id: str, session: Session) -> DiagnosisSummary:
     """
     rows = session.exec(
         select(CitationResult, CitationRun)
-        .join(CitationRun, CitationResult.citation_run_id == CitationRun.id)
+        .join(CitationRun, col(CitationResult.citation_run_id) == col(CitationRun.id))
         .where(
             CitationRun.project_id == project_id,
             CitationRun.report_eligible,
@@ -126,15 +126,25 @@ def _diagnose_visibility(project_id: str, session: Session) -> DiagnosisSummary:
             mentioned = "、".join(sorted(competitors))
             kind, priority = "competitor_gap", "high"
             title = "竞品已进入答案，品牌尚未出现"
-            detail = f"在「{prompt_text}」的 {samples} 个 {engine_id} 正式样本中，品牌未被提及；{mentioned} 被提及。先查看原始回答与来源，再决定是否建立优化工作。"
+            detail = (
+                f"在「{prompt_text}」的 {samples} 个 {engine_id} 正式样本中，"
+                f"品牌未被提及；{mentioned} 被提及。先查看原始回答与来源，"
+                "再决定是否建立优化工作。"
+            )
         elif group["brand"] > 0 and group["own"] == 0:
             kind, priority = "citation_gap", "medium"
             title = "品牌被提及，但未引用自有域名"
-            detail = f"在「{prompt_text}」的 {samples} 个 {engine_id} 正式样本中，品牌出现 {group['brand']} 次，但自有域名没有作为答案来源出现。"
+            detail = (
+                f"在「{prompt_text}」的 {samples} 个 {engine_id} 正式样本中，"
+                f"品牌出现 {group['brand']} 次，但自有域名没有作为答案来源出现。"
+            )
         elif group["brand"] == 0:
             kind, priority = "visibility_gap", "medium"
             title = "当前问题下尚未进入答案"
-            detail = f"在「{prompt_text}」的 {samples} 个 {engine_id} 正式样本中，未检测到品牌提及；这只说明当前问题和答案面，不代表整个市场。"
+            detail = (
+                f"在「{prompt_text}」的 {samples} 个 {engine_id} 正式样本中，"
+                "未检测到品牌提及；这只说明当前问题和答案面，不代表整个市场。"
+            )
         else:
             continue
         insight_id = f"{engine_id}:{intent}:{prompt_text}".replace(" ", "-")
@@ -536,7 +546,7 @@ async def run_due_tracking_plans(session: Session) -> DueTrackingResponse:
         select(TrackingPlan).where(
             TrackingPlan.status == "active",
             TrackingPlan.cadence != "manual",
-            (TrackingPlan.next_run_at.is_(None)) | (TrackingPlan.next_run_at <= now),
+            col(TrackingPlan.next_run_at).is_(None) | (col(TrackingPlan.next_run_at) <= now),
         )
     ).all()
     executions = []
@@ -566,7 +576,7 @@ def get_project_dashboard(project_id: str, session: Session) -> ProjectDashboard
     )
     evidence_rows = session.exec(
         select(CitationResult, CitationRun)
-        .join(CitationRun, CitationResult.citation_run_id == CitationRun.id)
+        .join(CitationRun, col(CitationResult.citation_run_id) == col(CitationRun.id))
         .where(CitationRun.project_id == project_id)
         .order_by(col(CitationRun.started_at).desc())
         .limit(30)
@@ -747,7 +757,9 @@ def create_work_item_from_diagnosis(
     existing = next(
         (
             item
-            for item in session.exec(select(WorkItem).where(WorkItem.project_id == project_id)).all()
+            for item in session.exec(
+                select(WorkItem).where(WorkItem.project_id == project_id)
+            ).all()
             if (item.evidence_snapshot or {}).get("diagnosis_id") == diagnosis_id
             and item.status != "dismissed"
         ),
@@ -767,7 +779,9 @@ def create_work_item_from_diagnosis(
         .order_by(col(GeoCycle.started_at).desc())
     ).first()
     if cycle is None:
-        brand = session.exec(select(BrandEntity).where(BrandEntity.project_id == project_id)).first()
+        brand = session.exec(
+            select(BrandEntity).where(BrandEntity.project_id == project_id)
+        ).first()
         cycle = GeoCycle(
             project_id=project_id,
             name=f"证据优化周期 {datetime.now(UTC).strftime('%Y-%m-%d')}",
@@ -779,22 +793,28 @@ def create_work_item_from_diagnosis(
                 "samples": latest_run.samples,
                 "brand_name": brand.brand_name if brand else project.name,
                 "aliases": brand.aliases if brand else [],
-                "brand_domains": brand.domains if brand else ([project.primary_domain] if project.primary_domain else []),
+                "brand_domains": (
+                    brand.domains
+                    if brand
+                    else ([project.primary_domain] if project.primary_domain else [])
+                ),
                 "competitors": brand.competitors if brand else [],
             },
             baseline_summary={
                 "captured_at": (latest_run.finished_at or latest_run.started_at).isoformat(),
-                "engines": [{
-                    "engine_id": insight.engine_id,
-                    "report_eligible": True,
-                    "measurement_scope": "citation",
-                    "source_surface": latest_run.surface_name,
-                    "sample_size": insight.sample_size,
-                    "entity_sov": insight.brand_mentions / insight.sample_size,
-                    "citation_sov": insight.own_domain_citations / insight.sample_size,
-                    "competitor_mentions": insight.competitor_mentions,
-                    "source_run_ids": insight.evidence_run_ids,
-                }],
+                "engines": [
+                    {
+                        "engine_id": insight.engine_id,
+                        "report_eligible": True,
+                        "measurement_scope": "citation",
+                        "source_surface": latest_run.surface_name,
+                        "sample_size": insight.sample_size,
+                        "entity_sov": insight.brand_mentions / insight.sample_size,
+                        "citation_sov": insight.own_domain_citations / insight.sample_size,
+                        "competitor_mentions": insight.competitor_mentions,
+                        "source_run_ids": insight.evidence_run_ids,
+                    }
+                ],
             },
         )
         session.add(cycle)
@@ -806,7 +826,9 @@ def create_work_item_from_diagnosis(
         source_activity_id=latest_run.activity_id,
         title=f"{insight.title}：{insight.prompt_text}",
         detail=insight.detail,
-        category={"citation_gap": "citation", "competitor_gap": "competitive"}.get(insight.kind, "visibility"),
+        category={"citation_gap": "citation", "competitor_gap": "competitive"}.get(
+            insight.kind, "visibility"
+        ),
         priority=Severity(insight.priority),
         evidence_snapshot={
             "diagnosis_id": insight.id,
@@ -982,7 +1004,7 @@ def _mark_artifact_implemented(
         select(WorkItem).where(
             WorkItem.cycle_id == item.cycle_id,
             WorkItem.id != item.id,
-            WorkItem.status.not_in({"done", "dismissed"}),
+            col(WorkItem.status).not_in({"done", "dismissed"}),
         )
     ).first()
     if remaining is None:
@@ -1070,9 +1092,11 @@ def _change_assessment(baseline: dict, verification: dict, prefix: str) -> str:
     baseline_high = baseline.get(f"{prefix}_ci_high")
     verification_low = verification.get(f"{prefix}_ci_low")
     verification_high = verification.get(f"{prefix}_ci_high")
-    if all(
-        value is not None
-        for value in (baseline_low, baseline_high, verification_low, verification_high)
+    if (
+        baseline_low is not None
+        and baseline_high is not None
+        and verification_low is not None
+        and verification_high is not None
     ):
         if float(verification_low) > float(baseline_high):
             return "improved"
