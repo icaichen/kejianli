@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from sqlmodel import Session
+from datetime import UTC, datetime, timedelta
+
+from sqlmodel import Session, select
 
 
 def test_health(client):
@@ -482,6 +484,111 @@ def test_tracking_plan_is_returned_on_project_dashboard(client, _qualified_citat
     due = client.post("/api/tracking/run-due")
     assert due.status_code == 200
     assert [item["plan_id"] for item in due.json()["executions"]] == [due_plan["id"]]
+
+
+def test_tracking_plan_lease_prevents_duplicate_execution(
+    client, engine, _qualified_citation_provider
+):
+    from keeplix.models import TrackingPlan
+
+    project = client.post(
+        "/api/projects", json={"name": "租约测试", "primary_domain": "keeplix.com"}
+    ).json()
+    prompt_set = client.post(
+        f"/api/projects/{project['id']}/prompt-sets",
+        json={"name": "租约问题", "prompts": ["GEO 工具"]},
+    ).json()
+    plan = client.post(
+        f"/api/projects/{project['id']}/tracking-plans",
+        json={
+            "prompt_set_id": prompt_set["id"],
+            "engine_ids": ["qwen"],
+            "samples": 1,
+            "cadence": "daily",
+            "next_run_at": "2020-01-01T00:00:00Z",
+        },
+    ).json()
+
+    with Session(engine) as session:
+        stored = session.get(TrackingPlan, plan["id"])
+        assert stored is not None
+        stored.lease_token = "other-worker"
+        stored.lease_expires_at = datetime.now(UTC) + timedelta(minutes=10)
+        session.add(stored)
+        session.commit()
+
+    assert client.post("/api/tracking/run-due").json()["executions"] == []
+    manual = client.post(f"/api/projects/{project['id']}/tracking-plans/{plan['id']}/run")
+    assert manual.status_code == 400
+    assert manual.json()["detail"] == "追踪计划正在执行，请稍后重试"
+
+    with Session(engine) as session:
+        stored = session.get(TrackingPlan, plan["id"])
+        assert stored is not None
+        stored.lease_expires_at = datetime.now(UTC) - timedelta(minutes=1)
+        session.add(stored)
+        session.commit()
+
+    recovered = client.post("/api/tracking/run-due").json()["executions"]
+    assert [item["plan_id"] for item in recovered] == [plan["id"]]
+    with Session(engine) as session:
+        stored = session.get(TrackingPlan, plan["id"])
+        assert stored is not None
+        assert stored.lease_token is None
+        assert stored.lease_expires_at is None
+
+
+def test_due_tracking_isolates_invalid_plans(client, engine, _qualified_citation_provider):
+    from keeplix.models import Prompt, TrackingPlan
+
+    project = client.post(
+        "/api/projects", json={"name": "批量追踪", "primary_domain": "keeplix.com"}
+    ).json()
+    invalid_prompt_set = client.post(
+        f"/api/projects/{project['id']}/prompt-sets",
+        json={"name": "失效问题", "prompts": ["旧问题"]},
+    ).json()
+    valid_prompt_set = client.post(
+        f"/api/projects/{project['id']}/prompt-sets",
+        json={"name": "有效问题", "prompts": ["GEO 工具"]},
+    ).json()
+
+    def create_due_plan(prompt_set_id: str) -> dict:
+        return client.post(
+            f"/api/projects/{project['id']}/tracking-plans",
+            json={
+                "prompt_set_id": prompt_set_id,
+                "engine_ids": ["qwen"],
+                "samples": 1,
+                "cadence": "daily",
+                "next_run_at": "2020-01-01T00:00:00Z",
+            },
+        ).json()
+
+    invalid_plan = create_due_plan(invalid_prompt_set["id"])
+    valid_plan = create_due_plan(valid_prompt_set["id"])
+    with Session(engine) as session:
+        prompts = session.exec(
+            select(Prompt).where(Prompt.prompt_set_id == invalid_prompt_set["id"])
+        ).all()
+        for prompt in prompts:
+            prompt.active = False
+            session.add(prompt)
+        session.commit()
+
+    executions = client.post("/api/tracking/run-due").json()["executions"]
+    by_plan = {item["plan_id"]: item for item in executions}
+    assert by_plan[invalid_plan["id"]]["status"] == "failed"
+    assert by_plan[invalid_plan["id"]]["errors"] == {"plan": "追踪计划没有可用问题"}
+    assert by_plan[valid_plan["id"]]["status"] == "done"
+
+    with Session(engine) as session:
+        failed = session.get(TrackingPlan, invalid_plan["id"])
+        assert failed is not None
+        assert failed.consecutive_failures == 1
+        assert failed.lease_token is None
+        assert failed.next_run_at is not None
+        assert failed.next_run_at <= datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=6)
 
 
 def test_engines_list_marks_stub(client):

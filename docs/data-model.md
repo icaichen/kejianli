@@ -131,6 +131,9 @@ AuditRun 的评分结果（1:1）。
 | measurement_scope | str | `citation` / `answer_visibility` / `brand_awareness` / `stub` / `legacy_unclassified` |
 | report_eligible | bool | 本次运行是否允许进入正式报告与自动决策 |
 
+### TrackingPlan
+项目级持续追踪配置。`next_run_at` 决定调度时间，`lease_token` 与 `lease_expires_at` 组成短期执行租约，确保多个调度器不会同时执行同一计划；进程异常退出后租约会自动过期并允许恢复。
+
 ### CitationResult
 单次采样样本（一个 prompt 的一次回答）。
 | id | UUID PK |

@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 from calendar import monthrange
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
+from sqlalchemy import update
 from sqlmodel import Session, col, select
 
 from keeplix.engines.prompt_quality import classify_prompt, summarize_prompt_quality
@@ -61,6 +63,99 @@ from keeplix.services.agent_service import get_agent_policy, list_agent_runs
 from keeplix.services.citation_service import run_citations
 
 _DEFAULT_ORG = "keeplix-default-org"
+_TRACKING_LEASE_DURATION = timedelta(minutes=30)
+_TRACKING_RETRY_BASE = timedelta(minutes=5)
+_TRACKING_RETRY_MAX = timedelta(hours=6)
+
+
+def _claim_tracking_plan(
+    plan_id: str,
+    session: Session,
+    *,
+    now: datetime,
+    due_only: bool,
+) -> str | None:
+    token = str(uuid4())
+    conditions = [
+        col(TrackingPlan.id) == plan_id,
+        col(TrackingPlan.status) == "active",
+        col(TrackingPlan.lease_expires_at).is_(None)
+        | (col(TrackingPlan.lease_expires_at) <= now),
+    ]
+    if due_only:
+        conditions.extend(
+            [
+                col(TrackingPlan.cadence) != "manual",
+                col(TrackingPlan.next_run_at).is_(None)
+                | (col(TrackingPlan.next_run_at) <= now),
+            ]
+        )
+    result = session.execute(
+        update(TrackingPlan)
+        .where(*conditions)
+        .values(
+            lease_token=token,
+            lease_expires_at=now + _TRACKING_LEASE_DURATION,
+            updated_at=now,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    session.commit()
+    session.expire_all()
+    return token if getattr(result, "rowcount", 0) == 1 else None
+
+
+def _release_tracking_plan(plan_id: str, token: str, session: Session) -> None:
+    session.execute(
+        update(TrackingPlan)
+        .where(
+            col(TrackingPlan.id) == plan_id,
+            col(TrackingPlan.lease_token) == token,
+        )
+        .values(lease_token=None, lease_expires_at=None)
+        .execution_options(synchronize_session=False)
+    )
+    session.commit()
+    session.expire_all()
+
+
+def _failure_retry_at(now: datetime, cadence: str, failures: int) -> datetime | None:
+    cadence_run_at = _next_run_at(now, cadence)
+    if cadence_run_at is None:
+        return None
+    multiplier = 2 ** max(failures - 1, 0)
+    retry_delay = min(_TRACKING_RETRY_BASE * multiplier, _TRACKING_RETRY_MAX)
+    return min(cadence_run_at, now + retry_delay)
+
+
+def _record_tracking_plan_failure(
+    plan_id: str,
+    error: Exception,
+    session: Session,
+    *,
+    now: datetime,
+) -> TrackingExecutionResponse:
+    plan = session.get(TrackingPlan, plan_id)
+    if plan is None:
+        raise ValueError("追踪计划不存在") from error
+    error_message = str(error).strip() or type(error).__name__
+    plan.last_run_at = now
+    plan.last_error = error_message[:800]
+    plan.consecutive_failures += 1
+    plan.next_run_at = _failure_retry_at(now, plan.cadence, plan.consecutive_failures)
+    plan.lease_token = None
+    plan.lease_expires_at = None
+    plan.updated_at = now
+    session.add(plan)
+    session.commit()
+    return TrackingExecutionResponse(
+        plan_id=plan.id,
+        status="failed",
+        results=[],
+        errors={"plan": error_message},
+        last_run_at=now,
+        next_run_at=plan.next_run_at,
+    )
 
 
 def _diagnose_visibility(project_id: str, session: Session) -> DiagnosisSummary:
@@ -460,6 +555,7 @@ async def execute_tracking_plan(
     session: Session,
     *,
     triggered_by: str = "user",
+    lease_token: str | None = None,
 ) -> TrackingExecutionResponse:
     plan = session.get(TrackingPlan, plan_id)
     if plan is None or plan.project_id != project_id:
@@ -485,59 +581,85 @@ async def execute_tracking_plan(
         brand.domains if brand else ([project.primary_domain] if project.primary_domain else [])
     )
 
-    results: list[SoVEngineResult] = []
-    errors: dict[str, str] = {}
-    for engine_id in plan.engine_ids:
-        try:
-            response = await run_citations(
-                CitationRunRequest(
-                    project_id=project_id,
-                    prompt_set_id=plan.prompt_set_id,
-                    tracking_plan_id=plan.id,
-                    triggered_by=triggered_by,
-                    engine_ids=[engine_id],
-                    prompts=prompts,
-                    brand_name=brand_name,
-                    aliases=aliases,
-                    brand_domains=domains,
-                    competitors=brand.competitors if brand else [],
-                    samples=plan.samples,
-                ),
-                session,
-            )
-            results.extend(response.results)
-            errors.update(response.errors)
-        except Exception as error:  # each engine is isolated; the next one must still run
-            errors[engine_id] = type(error).__name__
+    execution_token = lease_token
+    if execution_token is None:
+        execution_token = _claim_tracking_plan(
+            plan.id,
+            session,
+            now=datetime.now(UTC),
+            due_only=False,
+        )
+        if execution_token is None:
+            raise ValueError("追踪计划正在执行，请稍后重试")
+    else:
+        session.expire_all()
+        claimed_plan = session.get(TrackingPlan, plan.id)
+        if claimed_plan is None or claimed_plan.lease_token != execution_token:
+            raise ValueError("追踪计划执行租约已失效")
+        plan = claimed_plan
 
-    now = datetime.now(UTC)
-    plan.last_run_at = now
-    plan.next_run_at = _next_run_at(now, plan.cadence)
-    plan.last_error = ", ".join(f"{engine}: {error}" for engine, error in errors.items()) or None
-    plan.consecutive_failures = plan.consecutive_failures + 1 if errors else 0
-    plan.updated_at = now
-    session.add(plan)
-    session.commit()
-    status = "done" if not errors else "partial" if results else "failed"
-    if any(result.report_eligible for result in results):
-        from keeplix.services.agent_service import maybe_plan_from_tracking
+    try:
+        results: list[SoVEngineResult] = []
+        errors: dict[str, str] = {}
+        for engine_id in plan.engine_ids:
+            try:
+                response = await run_citations(
+                    CitationRunRequest(
+                        project_id=project_id,
+                        prompt_set_id=plan.prompt_set_id,
+                        tracking_plan_id=plan.id,
+                        triggered_by=triggered_by,
+                        engine_ids=[engine_id],
+                        prompts=prompts,
+                        brand_name=brand_name,
+                        aliases=aliases,
+                        brand_domains=domains,
+                        competitors=brand.competitors if brand else [],
+                        samples=plan.samples,
+                    ),
+                    session,
+                )
+                results.extend(response.results)
+                errors.update(response.errors)
+            except Exception as error:  # each engine is isolated; the next one must still run
+                errors[engine_id] = type(error).__name__
 
-        active_cycle = session.exec(
-            select(GeoCycle).where(
-                GeoCycle.project_id == project_id,
-                GeoCycle.status == "active",
-            )
-        ).first()
-        if active_cycle:
-            maybe_plan_from_tracking(project_id, active_cycle.id, session)
-    return TrackingExecutionResponse(
-        plan_id=plan.id,
-        status=status,
-        results=results,
-        errors=errors,
-        last_run_at=now,
-        next_run_at=plan.next_run_at,
-    )
+        now = datetime.now(UTC)
+        status = "done" if not errors else "partial" if results else "failed"
+        plan.last_run_at = now
+        plan.last_error = (
+            ", ".join(f"{engine}: {error}" for engine, error in errors.items()) or None
+        )
+        plan.consecutive_failures = plan.consecutive_failures + 1 if errors else 0
+        plan.next_run_at = (
+            _failure_retry_at(now, plan.cadence, plan.consecutive_failures)
+            if status == "failed"
+            else _next_run_at(now, plan.cadence)
+        )
+        plan.updated_at = now
+        session.add(plan)
+        session.commit()
+        if any(result.report_eligible for result in results):
+            from keeplix.services.agent_service import maybe_plan_from_tracking
+
+            active_cycle = session.exec(
+                select(GeoCycle).where(
+                    GeoCycle.project_id == project_id,
+                    GeoCycle.status == "active",
+                )
+            ).first()
+            if active_cycle:
+                maybe_plan_from_tracking(project_id, active_cycle.id, session)
+        return TrackingExecutionResponse(
+            plan_id=plan.id,
+            status=status,
+            results=results,
+            errors=errors,
+            last_run_at=now,
+            next_run_at=plan.next_run_at,
+        )
+    finally:
+        _release_tracking_plan(plan.id, execution_token, session)
 
 
 async def run_due_tracking_plans(session: Session) -> DueTrackingResponse:
@@ -547,13 +669,39 @@ async def run_due_tracking_plans(session: Session) -> DueTrackingResponse:
             TrackingPlan.status == "active",
             TrackingPlan.cadence != "manual",
             col(TrackingPlan.next_run_at).is_(None) | (col(TrackingPlan.next_run_at) <= now),
+            col(TrackingPlan.lease_expires_at).is_(None)
+            | (col(TrackingPlan.lease_expires_at) <= now),
         )
     ).all()
-    executions = []
+    executions: list[TrackingExecutionResponse] = []
     for plan in plans:
-        executions.append(
-            await execute_tracking_plan(plan.project_id, plan.id, session, triggered_by="schedule")
+        token = _claim_tracking_plan(
+            plan.id,
+            session,
+            now=now,
+            due_only=True,
         )
+        if token is None:
+            continue
+        try:
+            executions.append(
+                await execute_tracking_plan(
+                    plan.project_id,
+                    plan.id,
+                    session,
+                    triggered_by="schedule",
+                    lease_token=token,
+                )
+            )
+        except Exception as error:
+            executions.append(
+                _record_tracking_plan_failure(
+                    plan.id,
+                    error,
+                    session,
+                    now=datetime.now(UTC),
+                )
+            )
     return DueTrackingResponse(checked_at=now, executions=executions)
 
 

@@ -314,6 +314,8 @@ class TrackingPlan(SQLModel, table=True):
     last_run_at: datetime | None = None
     last_error: str | None = None
     consecutive_failures: int = 0
+    lease_token: str | None = None
+    lease_expires_at: datetime | None = None
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
 
