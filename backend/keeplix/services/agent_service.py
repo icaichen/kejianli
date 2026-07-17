@@ -6,6 +6,7 @@ implements, or publishes artifacts; those transitions remain in the existing hum
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 
 from sqlmodel import Session, col, select
@@ -14,6 +15,7 @@ from keeplix.models import (
     AgentAction,
     AgentPolicy,
     AgentRun,
+    BrandFact,
     CitationRun,
     GeoCycle,
     OptimizationArtifact,
@@ -30,6 +32,7 @@ from keeplix.schemas import (
     AgentRunCreate,
     AgentRunDTO,
 )
+from keeplix.services.engine_runtime_service import mark_engine_failure, mark_engine_success
 
 _ACTION_COST = 0.02
 _PRIORITY_ORDER = {"high": 0, "medium": 1, "low": 2}
@@ -174,6 +177,17 @@ def plan_agent_run(
         raise ValueError("没有可执行的活跃优化周期")
     if not _has_formal_cycle_baseline(cycle, session):
         raise ValueError("当前周期没有通过验收的真实答案面证据，Agent 不得执行")
+    project = session.get(Project, project_id)
+    if project is None:
+        raise ValueError("项目不存在")
+    facts = session.exec(
+        select(BrandFact).where(
+            BrandFact.project_id == project_id,
+            BrandFact.status == "verified",
+        )
+    ).all()
+    if not facts:
+        raise ValueError("请先添加至少一条已验证品牌事实，Agent 不能从空白信息生成")
     work_items = session.exec(
         select(WorkItem).where(
             WorkItem.cycle_id == cycle.id,
@@ -185,6 +199,8 @@ def plan_agent_run(
     )
     candidates: list[tuple[WorkItem, OptimizationArtifact]] = []
     for item in work_items:
+        if int((item.evidence_snapshot or {}).get("brief_version", 1)) != project.brief_version:
+            continue
         artifact = session.exec(
             select(OptimizationArtifact)
             .where(
@@ -223,7 +239,12 @@ def plan_agent_run(
         title="Agent 提交优化计划",
         triggered_by=trigger,
         status=RunStatus.pending,
-        input_snapshot={"goal": req.goal, "generation_engine": policy.generation_engine},
+        input_snapshot={
+            "goal": req.goal,
+            "generation_engine": policy.generation_engine,
+            "brand_fact_ids": [fact.id for fact in facts],
+            "brief_version": project.brief_version,
+        },
     )
     session.add(activity)
     session.flush()
@@ -240,6 +261,8 @@ def plan_agent_run(
             "action_count": len(candidates),
             "approval_required": True,
             "allow_direct_publish": False,
+            "brand_fact_ids": [fact.id for fact in facts],
+            "brief_version": project.brief_version,
         },
     )
     session.add(run)
@@ -326,6 +349,30 @@ async def execute_agent_run(project_id: str, run_id: str, session: Session) -> A
     provider = get_provider(policy.generation_engine)
     if provider.acquisition == "stub":
         raise ValueError("Agent 不能使用 Stub Provider 生成客户产物")
+    project = session.get(Project, project_id)
+    if project is None or int(run.plan.get("brief_version", 1)) != project.brief_version:
+        raise ValueError("Agent 计划属于旧研究 Brief，请基于当前证据重新提案")
+    planned_fact_ids = {
+        fact_id for fact_id in run.plan.get("brand_fact_ids", []) if isinstance(fact_id, str)
+    }
+    facts = session.exec(
+        select(BrandFact).where(
+            BrandFact.project_id == project_id,
+            BrandFact.status == "verified",
+            col(BrandFact.id).in_(planned_fact_ids),
+        )
+    ).all()
+    if {fact.id for fact in facts} != planned_fact_ids or not facts:
+        raise ValueError("Agent 计划使用的品牌事实已变更，请重新提案并审批")
+    fact_payload = [
+        {
+            "id": fact.id,
+            "type": fact.fact_type,
+            "claim": fact.claim,
+            "source_url": fact.source_url,
+        }
+        for fact in facts
+    ]
 
     run.status = "running"
     run.attempt_count += 1
@@ -363,13 +410,18 @@ async def execute_agent_run(project_id: str, run_id: str, session: Session) -> A
             session.commit()
             continue
         prompt = (
-            "你是一名严谨的 GEO 内容编辑。基于下列已有信息修订草稿，"
-            "提高结构清晰度、直接回答能力和实体表达。不得编造任何事实、数据、客户评价或引用。"
-            "只输出可供人工审批的修订后内容。\n\n"
-            f"工作目标：{item.title}\n诊断：{item.detail}\n已有草稿：\n{source.content}"
+            "你是一名严谨的 GEO 内容编辑。「已验证品牌事实」是唯一可用的产品事实来源。"
+            "已有草稿只能作为结构参考；删除任何无法被事实库支持的主张。"
+            "不得编造功能、数据、客户评价、价格或引用，也不得断言未经证据支持的"
+            "平台偏好、索引时效、信源权威度、渠道优先级或预期效果。"
+            "所有假设都必须标记「待验证」。只输出可供人工审批的修订后内容。\n\n"
+            f"工作目标：{item.title}\n诊断：{item.detail}\n"
+            f"已验证品牌事实：{json.dumps(fact_payload, ensure_ascii=False)}\n"
+            f"已有草稿：\n{source.content}"
         )
         try:
             response = await provider.query(prompt)
+            mark_engine_success(policy.generation_engine, session)
             previous = session.exec(
                 select(OptimizationArtifact).where(
                     OptimizationArtifact.work_item_id == item.id,
@@ -395,6 +447,8 @@ async def execute_agent_run(project_id: str, run_id: str, session: Session) -> A
                     "agent_run_id": run.id,
                     "agent_action_id": action.id,
                     "generation_engine": policy.generation_engine,
+                    "brand_fact_ids": [fact.id for fact in facts],
+                    "brief_version": project.brief_version,
                 },
                 created_by="agent",
             )
@@ -412,6 +466,7 @@ async def execute_agent_run(project_id: str, run_id: str, session: Session) -> A
             session.commit()
         except Exception as error:
             session.rollback()
+            mark_engine_failure(policy.generation_engine, type(error).__name__, session)
             stored_action = session.get(AgentAction, action.id)
             if stored_action:
                 stored_action.status = "failed"

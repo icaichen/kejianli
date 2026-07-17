@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from sqlalchemy import JSON, Column
+from sqlalchemy import JSON, Column, Index, text
 from sqlmodel import Field, SQLModel
 
 from keeplix.models.enums import (
@@ -59,6 +59,10 @@ class Project(SQLModel, table=True):
     name: str
     primary_domain: str = ""
     locale: str = "zh-CN"
+    market: str = "中国"
+    category: str = ""
+    research_objective: str = ""
+    brief_version: int = 1
     status: ProjectStatus = ProjectStatus.active
     created_at: datetime = Field(default_factory=_now)
 
@@ -71,6 +75,21 @@ class BrandEntity(SQLModel, table=True):
     aliases: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     domains: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     competitors: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+
+
+class BrandFact(SQLModel, table=True):
+    """用户确认、可追溯的品牌事实；Improve 与 Agent 的唯一生成依据。"""
+
+    __tablename__ = "brand_fact"
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    project_id: str = Field(foreign_key="project.id", index=True)
+    fact_type: str = "product"  # product | audience | proof | pricing | limitation | policy
+    claim: str
+    source_url: str
+    status: str = "verified"  # draft | verified | rejected
+    created_by: str = "user"
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
 
 
 class ProjectActivity(SQLModel, table=True):
@@ -171,6 +190,23 @@ class DeliveryRecord(SQLModel, table=True):
     published_at: datetime | None = None
 
 
+class CycleRetestPlan(SQLModel, table=True):
+    """Durable post-delivery retest for one GEO improvement cycle."""
+
+    __tablename__ = "cycle_retest_plan"
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    project_id: str = Field(foreign_key="project.id", index=True)
+    cycle_id: str = Field(foreign_key="geo_cycle.id", index=True)
+    source_delivery_id: str = Field(foreign_key="delivery_record.id", index=True)
+    status: str = "scheduled"  # scheduled | running | complete | failed | cancelled
+    scheduled_for: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    last_error: str = ""
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+
+
 class AgentPolicy(SQLModel, table=True):
     """Project guardrails shared by every autonomous or assisted Agent run."""
 
@@ -261,6 +297,35 @@ class EngineQualification(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=_now)
 
 
+class EngineValidationRun(SQLModel, table=True):
+    """Auditable provider validation evidence awaiting human review."""
+
+    __tablename__ = "engine_validation_run"
+    __table_args__ = (
+        Index(
+            "uq_engine_validation_run_one_running",
+            "engine_id",
+            unique=True,
+            sqlite_where=text("status = 'running'"),
+            postgresql_where=text("status = 'running'"),
+        ),
+    )
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    engine_id: str = Field(foreign_key="engine.id", index=True)
+    profile_version: int = 1
+    status: str = "running"  # running | passed | failed
+    review_status: str = "pending"  # pending | accepted | rejected
+    provider_acquisition: str = "stub"
+    measurement_scope: str = "stub"
+    checks: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    evidence: list[dict] = Field(default_factory=list, sa_column=Column(JSON))
+    error_summary: str = ""
+    started_at: datetime = Field(default_factory=_now)
+    finished_at: datetime | None = None
+    reviewed_at: datetime | None = None
+    review_notes: str = ""
+
+
 class EngineRuntimeStatus(SQLModel, table=True):
     """Latest observed runtime health for one provider integration."""
 
@@ -295,6 +360,7 @@ class PromptSet(SQLModel, table=True):
     name: str
     version: int = 1
     kind: str = "tracking"  # tracking | exploration
+    brief_version: int = 1
     active: bool = True
     created_at: datetime = Field(default_factory=_now)
 
@@ -373,6 +439,7 @@ class CitationRun(SQLModel, table=True):
     project_id: str = Field(foreign_key="project.id", index=True)
     prompt_set_id: str | None = Field(default=None, foreign_key="prompt_set.id", index=True)
     tracking_plan_id: str | None = Field(default=None, foreign_key="tracking_plan.id", index=True)
+    brief_version: int = 1
     engine_id: str = Field(foreign_key="engine.id", index=True)
     surface_name: str = ""
     provider_acquisition: str = "stub"
@@ -409,7 +476,10 @@ class VisibilityScore(SQLModel, table=True):
     project_id: str = Field(foreign_key="project.id", index=True)
     engine_id: str = Field(foreign_key="engine.id", index=True)
     surface_name: str = ""
+    provider_acquisition: str = "legacy_unclassified"
+    measurement_scope: str = "legacy_unclassified"
     tracking_plan_id: str | None = Field(default=None, foreign_key="tracking_plan.id", index=True)
+    brief_version: int = 1
     report_eligible: bool = False
     measurement_quality: dict = Field(default_factory=dict, sa_column=Column(JSON))
     period: datetime = Field(default_factory=_now)

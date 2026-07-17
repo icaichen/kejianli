@@ -7,18 +7,18 @@ const siteUrl = new URL(process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:30
 
 export const metadata: Metadata = {
   metadataBase: siteUrl,
-  title: "可见力 · 让 AI 看见、引用和推荐你的品牌",
-  description: "从检测 AI 可见度，到完成 GEO 优化，再到让 AI 持续执行。面向中文内容与国产模型的 GEO 平台。",
+  title: "可见力 · 企业 AI 市场研究与品牌可见度",
+  description: "为品牌团队与咨询公司研究 AI 答案中的品牌份额、竞品表现、推荐理由与来源证据。",
   openGraph: {
     title: "可见力 · 成为 AI 选择的答案",
-    description: "检测、优化并持续提升你的 AI 可见度。",
+    description: "研究 AI 答案中的品牌份额、竞品表现与来源证据。",
     type: "website",
     images: [{ url: "/og.png", width: 1200, height: 630, alt: "可见力 GEO 平台" }],
   },
   twitter: {
     card: "summary_large_image",
     title: "可见力 · 成为 AI 选择的答案",
-    description: "检测、优化并持续提升你的 AI 可见度。",
+    description: "研究 AI 答案中的品牌份额、竞品表现与来源证据。",
     images: ["/og.png"],
   },
 };
@@ -42,14 +42,11 @@ export default function RootLayout({
                 <small>keeplix</small>
               </Link>
               <div className="nav-links">
-                <Link href="/#product">产品</Link>
-                <Link href="/analyses">检测</Link>
-                <Link href="/visibility">可见度</Link>
-                <Link href="/optimize">优化</Link>
+                <Link href="/#product">怎么工作</Link>
                 <Link href="/projects">项目</Link>
                 <Link href="/#method">方法</Link>
               </div>
-              <Link className="nav-cta" href="/analyses">免费检测 <span aria-hidden="true">↗</span></Link>
+              <Link className="nav-cta" href="/start">新建研究项目 <span aria-hidden="true">↗</span></Link>
             </nav>
           </header>
           <main id="main-content">{children}</main>
@@ -59,8 +56,8 @@ export default function RootLayout({
                 <span className="wordmark-seal" aria-hidden="true">见</span>
                 <span>可见力</span>
               </Link>
-              <p>从发现问题，到完成优化，再到持续增长。</p>
-              <Link href="/analyses" className="footer-action">检测我的 AI 可见度 <span aria-hidden="true">↗</span></Link>
+              <p>让每一个 AI 市场结论都能回到真实答案与来源。</p>
+              <Link href="/start" className="footer-action">新建 AI 市场研究 <span aria-hidden="true">↗</span></Link>
             </div>
           </footer>
         </Providers>

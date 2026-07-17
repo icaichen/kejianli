@@ -5,34 +5,32 @@ import { useRouter } from "next/navigation";
 
 export function AuditEntry({ compact = false }: { compact?: boolean }) {
   const router = useRouter();
-  const [url, setUrl] = useState("");
+  const [brand, setBrand] = useState("");
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const value = url.trim();
+    const value = brand.trim();
     if (!value) return;
-    const normalized = /^https?:\/\//i.test(value) ? value : `https://${value}`;
-    router.push(`/analyses?url=${encodeURIComponent(normalized)}&run=1`);
+    router.push(`/start?brand=${encodeURIComponent(value)}`);
   }
 
   return (
     <form className={compact ? "audit-entry audit-entry-compact" : "audit-entry"} onSubmit={submit}>
-      <label htmlFor={compact ? "footer-url" : "hero-url"}>网站地址</label>
+      <label htmlFor={compact ? "footer-url" : "hero-url"}>品牌或客户</label>
       <div>
-        <span aria-hidden="true">https://</span>
+        <span aria-hidden="true">研究</span>
         <input
           id={compact ? "footer-url" : "hero-url"}
-          value={url}
-          onChange={(event) => setUrl(event.target.value)}
-          placeholder="你的品牌网址"
-          inputMode="url"
-          autoComplete="url"
+          value={brand}
+          onChange={(event) => setBrand(event.target.value)}
+          placeholder="客户、品牌或品类"
+          autoComplete="organization"
           suppressHydrationWarning
           required
         />
-        <button type="submit">免费检测 <span aria-hidden="true">→</span></button>
+        <button type="submit">创建研究项目 <span aria-hidden="true">→</span></button>
       </div>
-      {!compact && <p>无需注册 · 先查看基础结果 · 约 30–60 秒</p>}
+      {!compact && <p>适用于品牌团队、咨询公司与市场研究项目</p>}
     </form>
   );
 }

@@ -8,25 +8,41 @@ from sqlmodel import Session
 from keeplix.core.db import get_session
 from keeplix.schemas import (
     ArtifactExportResponse,
+    ArtifactGenerateRequest,
     ArtifactRevisionCreate,
     ArtifactStatusUpdate,
+    BrandFactCreate,
+    BrandFactDTO,
+    BrandFactUpdate,
     CycleVerificationResponse,
     DeliveryRecordCreate,
     DeliveryRecordDTO,
+    DueRetestResponse,
     DueTrackingResponse,
     OptimizationArtifactDTO,
     ProjectCreate,
     ProjectDashboard,
     ProjectResponse,
+    ProjectUpdate,
     PromptSetCreate,
     PromptSetResponse,
     PromptSetVersionCreate,
+    ResearchQuestionFrameworkDTO,
+    ResearchReportDTO,
+    SiteProfileRequest,
+    SiteProfileResponse,
     TrackingExecutionResponse,
     TrackingPlanCreate,
     TrackingPlanResponse,
     WorkItemDetail,
     WorkItemDTO,
     WorkItemUpdate,
+)
+from keeplix.services.artifact_generation_service import generate_artifact
+from keeplix.services.brand_fact_service import (
+    create_brand_fact,
+    list_brand_facts,
+    update_brand_fact,
 )
 from keeplix.services.project_service import (
     create_artifact_revision,
@@ -43,13 +59,67 @@ from keeplix.services.project_service import (
     list_projects,
     list_prompt_sets,
     list_tracking_plans,
+    run_due_cycle_retests,
     run_due_tracking_plans,
     update_artifact_status,
+    update_project,
     update_work_item,
     verify_geo_cycle,
 )
+from keeplix.services.research_question_service import build_research_question_framework
+from keeplix.services.research_report_service import get_research_report
+from keeplix.services.research_scope_service import (
+    incomplete_brief_message,
+    project_research_readiness,
+)
+from keeplix.services.site_profile_service import discover_site
 
 router = APIRouter(tags=["projects"])
+
+
+@router.post("/projects/discover", response_model=SiteProfileResponse)
+async def discover_project_site(req: SiteProfileRequest) -> SiteProfileResponse:
+    try:
+        return await discover_site(req)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@router.get("/projects/{project_id}/brand-facts", response_model=list[BrandFactDTO])
+def brand_facts(
+    project_id: str, session: Session = Depends(get_session)
+) -> list[BrandFactDTO]:
+    try:
+        return list_brand_facts(project_id, session)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@router.post("/projects/{project_id}/brand-facts", response_model=BrandFactDTO)
+def add_brand_fact(
+    project_id: str,
+    req: BrandFactCreate,
+    session: Session = Depends(get_session),
+) -> BrandFactDTO:
+    try:
+        return create_brand_fact(project_id, req, session)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@router.patch(
+    "/projects/{project_id}/brand-facts/{fact_id}", response_model=BrandFactDTO
+)
+def edit_brand_fact(
+    project_id: str,
+    fact_id: str,
+    req: BrandFactUpdate,
+    session: Session = Depends(get_session),
+) -> BrandFactDTO:
+    try:
+        return update_brand_fact(project_id, fact_id, req, session)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
 
 @router.post("/projects", response_model=ProjectResponse)
@@ -62,12 +132,57 @@ def index(session: Session = Depends(get_session)) -> list[ProjectResponse]:
     return list_projects(session)
 
 
+@router.patch("/projects/{project_id}", response_model=ProjectResponse)
+def update(
+    project_id: str,
+    req: ProjectUpdate,
+    session: Session = Depends(get_session),
+) -> ProjectResponse:
+    project = update_project(project_id, req, session)
+    if project is None:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    return project
+
+
 @router.get("/projects/{project_id}", response_model=ProjectDashboard)
 def detail(project_id: str, session: Session = Depends(get_session)) -> ProjectDashboard:
     dashboard = get_project_dashboard(project_id, session)
     if dashboard is None:
         raise HTTPException(status_code=404, detail="项目不存在")
     return dashboard
+
+
+@router.get("/projects/{project_id}/research-report", response_model=ResearchReportDTO)
+def research_report(
+    project_id: str,
+    session: Session = Depends(get_session),
+) -> ResearchReportDTO:
+    report = get_research_report(project_id, session)
+    if report is None:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    return report
+
+
+@router.get(
+    "/projects/{project_id}/question-framework",
+    response_model=ResearchQuestionFrameworkDTO,
+)
+def question_framework(
+    project_id: str,
+    session: Session = Depends(get_session),
+) -> ResearchQuestionFrameworkDTO:
+    project, _brand, missing_fields = project_research_readiness(project_id, session)
+    if project is None:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    if missing_fields:
+        raise HTTPException(
+            status_code=409,
+            detail=incomplete_brief_message(missing_fields),
+        )
+    framework = build_research_question_framework(project_id, session)
+    if framework is None:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    return framework
 
 
 @router.get("/projects/{project_id}/prompt-sets", response_model=list[PromptSetResponse])
@@ -87,7 +202,8 @@ def create_prompt_set_route(
     try:
         return create_prompt_set(project_id, req, session)
     except ValueError as error:
-        raise HTTPException(status_code=404, detail=str(error)) from error
+        status_code = 404 if str(error) == "项目不存在" else 400
+        raise HTTPException(status_code=status_code, detail=str(error)) from error
 
 
 @router.post(
@@ -147,6 +263,13 @@ async def run_due_tracking_route(
     session: Session = Depends(get_session),
 ) -> DueTrackingResponse:
     return await run_due_tracking_plans(session)
+
+
+@router.post("/retests/run-due", response_model=DueRetestResponse)
+async def run_due_retests_route(
+    session: Session = Depends(get_session),
+) -> DueRetestResponse:
+    return await run_due_cycle_retests(session)
 
 
 @router.patch("/projects/{project_id}/work-items/{work_item_id}", response_model=WorkItemDTO)
@@ -216,6 +339,22 @@ def create_artifact_revision_route(
 ) -> OptimizationArtifactDTO:
     try:
         return create_artifact_revision(project_id, work_item_id, req, session)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@router.post(
+    "/projects/{project_id}/work-items/{work_item_id}/generate-artifact",
+    response_model=OptimizationArtifactDTO,
+)
+async def generate_artifact_route(
+    project_id: str,
+    work_item_id: str,
+    req: ArtifactGenerateRequest,
+    session: Session = Depends(get_session),
+) -> OptimizationArtifactDTO:
+    try:
+        return await generate_artifact(project_id, work_item_id, req, session)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 

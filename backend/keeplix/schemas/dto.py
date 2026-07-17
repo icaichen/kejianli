@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -82,21 +83,211 @@ class CitationRunResponse(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
+# Provider 验证
+# --------------------------------------------------------------------------- #
+class ProviderValidationDTO(BaseModel):
+    id: str
+    engine_id: str
+    profile_version: int
+    status: str
+    review_status: str
+    provider_acquisition: str
+    measurement_scope: str
+    checks: dict[str, bool]
+    evidence: list[dict]
+    error_summary: str
+    started_at: datetime
+    finished_at: datetime | None
+    reviewed_at: datetime | None
+    review_notes: str
+
+
+class ProviderValidationReview(BaseModel):
+    decision: Literal["accepted", "rejected"]
+    notes: str = Field(min_length=2, max_length=1000)
+
+
+# --------------------------------------------------------------------------- #
 # 项目
 # --------------------------------------------------------------------------- #
 class ProjectCreate(BaseModel):
-    name: str
+    name: str = Field(min_length=1, max_length=120)
     primary_domain: str = ""
     client_name: str = "default"
+    brand_name: str = ""
+    competitors: list[str] = Field(default_factory=list)
     locale: str = "zh-CN"
+    market: str = "中国"
+    category: str = ""
+    research_objective: str = ""
+
+
+class ProjectUpdate(BaseModel):
+    brand_name: str | None = Field(default=None, min_length=1, max_length=120)
+    competitors: list[str] | None = None
+    primary_domain: str | None = Field(default=None, max_length=255)
+    market: str | None = Field(default=None, min_length=1, max_length=120)
+    category: str | None = Field(default=None, max_length=160)
+    research_objective: str | None = Field(default=None, max_length=2000)
 
 
 class ProjectResponse(BaseModel):
     id: str
     name: str
+    client_name: str
+    brand_name: str
+    competitors: list[str]
     primary_domain: str
     locale: str
+    market: str
+    category: str
+    research_objective: str
+    brief_version: int = 1
+    brief_ready: bool = False
+    brief_missing_fields: list[str] = Field(default_factory=list)
     status: str
+
+
+class SiteProfileRequest(BaseModel):
+    url: str = Field(min_length=4, max_length=2000)
+
+
+class SiteProfileEvidence(BaseModel):
+    field: Literal["brand_name", "category", "summary", "language"]
+    value: str
+    source: str
+
+
+class SiteProfileResponse(BaseModel):
+    url: str
+    status: int
+    title: str
+    brand_name: str
+    category: str
+    summary: str
+    language: str
+    evidence: list[SiteProfileEvidence] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class BrandFactCreate(BaseModel):
+    fact_type: Literal[
+        "product", "audience", "proof", "pricing", "limitation", "policy"
+    ] = "product"
+    claim: str = Field(min_length=2, max_length=2000)
+    source_url: str = Field(min_length=4, max_length=2000)
+
+
+class BrandFactUpdate(BaseModel):
+    fact_type: Literal[
+        "product", "audience", "proof", "pricing", "limitation", "policy"
+    ] | None = None
+    claim: str | None = Field(default=None, min_length=2, max_length=2000)
+    source_url: str | None = Field(default=None, min_length=4, max_length=2000)
+    status: Literal["draft", "verified", "rejected"] | None = None
+
+
+class BrandFactDTO(BaseModel):
+    id: str
+    project_id: str
+    fact_type: str
+    claim: str
+    source_url: str
+    status: str
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ResearchReportEngine(BaseModel):
+    engine_id: str
+    surface_name: str
+    entity_sov: float
+    citation_sov: float
+    competitor_sov: dict[str, float] = Field(default_factory=dict)
+    relative_sov: float | None = None
+    sample_size: int
+
+
+class ResearchReportCompetitor(BaseModel):
+    name: str
+    mention_count: int
+    mention_rate: float
+
+
+class ResearchReportSource(BaseModel):
+    domain: str
+    citation_count: int
+    citation_share: float
+    owned: bool = False
+
+
+class ResearchReportFinding(BaseModel):
+    kind: str
+    title: str
+    detail: str
+    evidence: str
+
+
+class ResearchReportIntent(BaseModel):
+    intent: Literal["branded", "category", "problem", "comparison"]
+    label: str
+    sample_count: int
+    entity_sov: float
+    citation_sov: float
+    competitor_sov: dict[str, float] = Field(default_factory=dict)
+
+
+class ResearchReportDTO(BaseModel):
+    project_id: str
+    project_name: str
+    client_name: str
+    brand_name: str
+    market: str
+    category: str
+    research_objective: str
+    competitors: list[str]
+    status: Literal["ready", "waiting_for_baseline"]
+    generated_at: datetime
+    brief_version: int
+    tracking_plan_ids: list[str] = Field(default_factory=list)
+    prompt_set_ids: list[str] = Field(default_factory=list)
+    question_count: int = 0
+    measurement_quality: dict = Field(default_factory=dict)
+    period_start: datetime | None = None
+    period_end: datetime | None = None
+    qualified_run_count: int = 0
+    sample_count: int = 0
+    engine_count: int = 0
+    entity_sov: float = 0.0
+    citation_sov: float = 0.0
+    discovery_sov: float = 0.0
+    discovery_citation_sov: float = 0.0
+    executive_summary: str
+    intent_results: list[ResearchReportIntent] = Field(default_factory=list)
+    engine_results: list[ResearchReportEngine] = Field(default_factory=list)
+    competitor_results: list[ResearchReportCompetitor] = Field(default_factory=list)
+    source_results: list[ResearchReportSource] = Field(default_factory=list)
+    findings: list[ResearchReportFinding] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    methodology: list[str] = Field(default_factory=list)
+
+
+class ResearchQuestionItemDTO(BaseModel):
+    id: str
+    intent: Literal["branded", "category", "problem", "comparison"]
+    text: str
+    rationale: str
+    selected: bool = True
+
+
+class ResearchQuestionFrameworkDTO(BaseModel):
+    project_id: str
+    title: str
+    summary: str
+    recommended_samples: int = 2
+    items: list[ResearchQuestionItemDTO]
+    measurement_quality: dict = Field(default_factory=dict)
 
 
 class PromptSetCreate(BaseModel):
@@ -117,6 +308,8 @@ class PromptSetResponse(BaseModel):
     version: int
     kind: str
     active: bool
+    brief_version: int = 1
+    scope_current: bool = True
     prompts: list[str]
     prompt_items: list[dict] = Field(default_factory=list)
     measurement_quality: dict = Field(default_factory=dict)
@@ -142,6 +335,7 @@ class TrackingPlanResponse(BaseModel):
     samples: int
     cadence: str
     status: str
+    scope_current: bool = True
     next_run_at: datetime | None
     last_run_at: datetime | None
     last_error: str | None
@@ -168,6 +362,13 @@ class VisibilitySnapshot(BaseModel):
     citation_ci_high: float | None = None
     period: datetime
     tracking_plan_id: str | None = None
+    brief_version: int = 1
+    scope_current: bool = True
+    comparison_status: Literal["standalone", "baseline", "comparable", "scope_changed"]
+    comparison_note: str
+    previous_period: datetime | None = None
+    entity_delta: float | None = None
+    citation_delta: float | None = None
 
 
 class TrackingExecutionResponse(BaseModel):
@@ -196,9 +397,12 @@ class CitationEvidence(BaseModel):
     own_domain_cited: bool
     competitor_mentions: list[str] = Field(default_factory=list)
     request_id: str | None = None
+    provider_metadata: dict = Field(default_factory=dict)
     surface_name: str = ""
     measurement_scope: str = "stub"
     report_eligible: bool = False
+    brief_version: int = 1
+    scope_current: bool = True
 
 
 class VisibilityDiagnosis(BaseModel):
@@ -240,6 +444,19 @@ class ProjectActivityDTO(BaseModel):
     finished_at: datetime | None
 
 
+class CycleRetestPlanDTO(BaseModel):
+    id: str
+    cycle_id: str
+    source_delivery_id: str
+    status: str
+    scheduled_for: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+    last_error: str
+    created_at: datetime
+    updated_at: datetime
+
+
 class GeoCycleDTO(BaseModel):
     id: str
     name: str
@@ -249,6 +466,7 @@ class GeoCycleDTO(BaseModel):
     measurement_config: dict
     baseline_summary: dict
     verification_summary: dict
+    retest_plan: CycleRetestPlanDTO | None = None
     started_at: datetime
     completed_at: datetime | None
 
@@ -281,6 +499,14 @@ class CycleVerificationResponse(BaseModel):
     verification_summary: dict
 
 
+class DueRetestResponse(BaseModel):
+    processed: int = 0
+    completed: int = 0
+    failed: int = 0
+    plan_ids: list[str] = Field(default_factory=list)
+    errors: dict[str, str] = Field(default_factory=dict)
+
+
 class OptimizationArtifactDTO(BaseModel):
     id: str
     work_item_id: str
@@ -303,6 +529,12 @@ class ArtifactRevisionCreate(BaseModel):
     title: str
     content: str = ""
     structured_content: dict = Field(default_factory=dict)
+    source_artifact_id: str | None = None
+
+
+class ArtifactGenerateRequest(BaseModel):
+    kind: Literal["content", "jsonld", "instructions"]
+    engine_id: str = "deepseek"
 
 
 class ArtifactStatusUpdate(BaseModel):
@@ -314,6 +546,7 @@ class DeliveryRecordCreate(BaseModel):
     status: str = "published"
     target_url: str = ""
     notes: str = ""
+    retest_after_days: int = Field(default=7, ge=1, le=30)
 
 
 class DeliveryRecordDTO(BaseModel):
@@ -340,6 +573,7 @@ class WorkItemDetail(BaseModel):
     item: WorkItemDTO
     artifacts: list[OptimizationArtifactDTO]
     deliveries: list[DeliveryRecordDTO]
+    retest_plan: CycleRetestPlanDTO | None = None
 
 
 class AgentPolicyUpdate(BaseModel):

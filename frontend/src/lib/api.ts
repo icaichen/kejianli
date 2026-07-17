@@ -79,13 +79,66 @@ export interface CitationRunRequest {
   samples?: number;
   project_id?: string | null;
   prompt_set_id?: string | null;
+  tracking_plan_id?: string | null;
 }
 
 export interface ProjectCreateRequest {
   name: string;
   primary_domain?: string;
   client_name?: string;
+  brand_name?: string;
+  competitors?: string[];
   locale?: string;
+  market?: string;
+  category?: string;
+  research_objective?: string;
+}
+
+export interface SiteProfileEvidence {
+  field: "brand_name" | "category" | "summary" | "language";
+  value: string;
+  source: string;
+}
+
+export interface SiteProfile {
+  url: string;
+  status: number;
+  title: string;
+  brand_name: string;
+  category: string;
+  summary: string;
+  language: string;
+  evidence: SiteProfileEvidence[];
+  warnings: string[];
+}
+
+export interface ProjectUpdateRequest {
+  brand_name?: string;
+  competitors?: string[];
+  primary_domain?: string;
+  market?: string;
+  category?: string;
+  research_objective?: string;
+}
+
+export type BrandFactType = "product" | "audience" | "proof" | "pricing" | "limitation" | "policy";
+
+export interface BrandFact {
+  id: string;
+  project_id: string;
+  fact_type: BrandFactType;
+  claim: string;
+  source_url: string;
+  status: "draft" | "verified" | "rejected";
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BrandFactCreateRequest {
+  fact_type: BrandFactType;
+  claim: string;
+  source_url: string;
 }
 
 export interface PromptSetCreateRequest { name: string; prompts: string[]; kind?: string; }
@@ -102,9 +155,85 @@ export interface TrackingPlanCreateRequest {
 export interface Project {
   id: string;
   name: string;
+  client_name: string;
+  brand_name: string;
+  competitors: string[];
   primary_domain: string;
   locale: string;
+  market: string;
+  category: string;
+  research_objective: string;
+  brief_version: number;
+  brief_ready: boolean;
+  brief_missing_fields: string[];
   status: string;
+}
+
+export interface ResearchReport {
+  project_id: string;
+  project_name: string;
+  client_name: string;
+  brand_name: string;
+  market: string;
+  category: string;
+  research_objective: string;
+  competitors: string[];
+  status: "ready" | "waiting_for_baseline";
+  generated_at: string;
+  brief_version: number;
+  tracking_plan_ids: string[];
+  prompt_set_ids: string[];
+  question_count: number;
+  measurement_quality: MeasurementQuality;
+  period_start: string | null;
+  period_end: string | null;
+  qualified_run_count: number;
+  sample_count: number;
+  engine_count: number;
+  entity_sov: number;
+  citation_sov: number;
+  discovery_sov: number;
+  discovery_citation_sov: number;
+  executive_summary: string;
+  intent_results: Array<{
+    intent: "branded" | "category" | "problem" | "comparison";
+    label: string;
+    sample_count: number;
+    entity_sov: number;
+    citation_sov: number;
+    competitor_sov: Record<string, number>;
+  }>;
+  engine_results: Array<{
+    engine_id: string;
+    surface_name: string;
+    entity_sov: number;
+    citation_sov: number;
+    competitor_sov: Record<string, number>;
+    relative_sov: number | null;
+    sample_size: number;
+  }>;
+  competitor_results: Array<{ name: string; mention_count: number; mention_rate: number }>;
+  source_results: Array<{ domain: string; citation_count: number; citation_share: number; owned: boolean }>;
+  findings: Array<{ kind: string; title: string; detail: string; evidence: string }>;
+  warnings: string[];
+  methodology: string[];
+}
+
+export interface ResearchQuestionItem {
+  id: string;
+  intent: "branded" | "category" | "problem" | "comparison";
+  text: string;
+  rationale: string;
+  selected: boolean;
+}
+
+export interface ResearchQuestionFramework {
+  project_id: string;
+  title: string;
+  summary: string;
+  recommended_samples: number;
+  items: ResearchQuestionItem[];
+  measurement_quality: MeasurementQuality;
 }
 
 export interface VisibilitySnapshot extends Omit<SoVEngineResult, "entity_ci_low" | "entity_ci_high" | "citation_ci_low" | "citation_ci_high"> {
@@ -114,6 +243,13 @@ export interface VisibilitySnapshot extends Omit<SoVEngineResult, "entity_ci_low
   citation_ci_high: number | null;
   period: string;
   tracking_plan_id: string | null;
+  brief_version: number;
+  scope_current: boolean;
+  comparison_status: "standalone" | "baseline" | "comparable" | "scope_changed";
+  comparison_note: string;
+  previous_period: string | null;
+  entity_delta: number | null;
+  citation_delta: number | null;
 }
 
 export interface ProjectDashboard extends Project {
@@ -213,15 +349,20 @@ export interface GeoCycle {
   baseline_summary: { captured_at?: string; engines?: SoVEngineResult[] };
   verification_summary: {
     captured_at?: string;
+    brief_version?: number;
+    comparison_status?: "comparable" | "scope_changed";
+    comparison_note?: string;
     questions?: string[];
     engines?: Array<{
       engine_id: string;
       baseline: SoVEngineResult;
       verification: SoVEngineResult;
-      entity_delta: number;
-      citation_delta: number;
-      entity_assessment: "improved" | "declined" | "unchanged" | "uncertain";
-      citation_assessment: "improved" | "declined" | "unchanged" | "uncertain";
+      comparison_status: "comparable" | "scope_changed";
+      comparison_reasons: string[];
+      entity_delta: number | null;
+      citation_delta: number | null;
+      entity_assessment: "improved" | "declined" | "unchanged" | "uncertain" | "not_comparable";
+      citation_assessment: "improved" | "declined" | "unchanged" | "uncertain" | "not_comparable";
     }>;
     changes?: Array<{
       work_item_id: string;
@@ -233,8 +374,22 @@ export interface GeoCycle {
       published_at: string | null;
     }>;
   };
+  retest_plan: CycleRetestPlan | null;
   started_at: string;
   completed_at: string | null;
+}
+
+export interface CycleRetestPlan {
+  id: string;
+  cycle_id: string;
+  source_delivery_id: string;
+  status: "scheduled" | "running" | "complete" | "failed" | "cancelled";
+  scheduled_for: string;
+  started_at: string | null;
+  completed_at: string | null;
+  last_error: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface WorkItem {
@@ -284,7 +439,7 @@ export interface DeliveryRecord {
   published_at: string | null;
 }
 
-export interface WorkItemDetail { item: WorkItem; artifacts: OptimizationArtifact[]; deliveries: DeliveryRecord[]; }
+export interface WorkItemDetail { item: WorkItem; artifacts: OptimizationArtifact[]; deliveries: DeliveryRecord[]; retest_plan: CycleRetestPlan | null; }
 
 export interface ProjectActivity {
   id: string;
@@ -298,6 +453,9 @@ export interface ProjectActivity {
     samples_per_question?: number;
     url?: string;
     brand_name?: string;
+    brief_version?: number;
+    formal_scope_ready?: boolean;
+    brief_missing_fields?: string[];
     legacy?: boolean;
   };
   output_summary: {
@@ -325,7 +483,7 @@ export interface MeasurementQuality {
   warnings: string[];
   prompt_intents: Array<{ text: string; intent: string }>;
 }
-export interface PromptSet { id: string; source_prompt_set_id: string | null; name: string; version: number; kind: string; active: boolean; prompts: string[]; prompt_items: PromptItem[]; measurement_quality: MeasurementQuality; created_at: string; }
+export interface PromptSet { id: string; source_prompt_set_id: string | null; name: string; version: number; kind: string; active: boolean; brief_version: number; scope_current: boolean; prompts: string[]; prompt_items: PromptItem[]; measurement_quality: MeasurementQuality; created_at: string; }
 
 export interface TrackingPlan {
   id: string;
@@ -338,6 +496,7 @@ export interface TrackingPlan {
   samples: number;
   cadence: string;
   status: string;
+  scope_current: boolean;
   next_run_at: string | null;
   last_run_at: string | null;
   last_error: string | null;
@@ -366,9 +525,12 @@ export interface CitationEvidence {
   own_domain_cited: boolean;
   competitor_mentions: string[];
   request_id: string | null;
+  provider_metadata: Record<string, string | number | boolean | null>;
   surface_name: string;
   measurement_scope: string;
   report_eligible: boolean;
+  brief_version: number;
+  scope_current: boolean;
 }
 
 export interface EngagementReport {
@@ -450,7 +612,10 @@ async function patch<T>(path: string, body: unknown): Promise<T> {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!resp.ok) throw new Error(`更新失败（HTTP ${resp.status}）`);
+  if (!resp.ok) {
+    const payload = await resp.json().catch(() => null) as { detail?: string } | null;
+    throw new Error(payload?.detail || `更新失败（HTTP ${resp.status}）`);
+  }
   return (await resp.json()) as T;
 }
 
@@ -475,8 +640,15 @@ export const api = {
     post<CitationRunResponse>("/api/citations/run", req),
   createProject: (req: ProjectCreateRequest) =>
     post<Project>("/api/projects", req),
+  discoverSite: (url: string) => post<SiteProfile>("/api/projects/discover", { url }),
   projects: () => get<Project[]>("/api/projects"),
   project: (id: string) => get<ProjectDashboard>(`/api/projects/${id}`),
+  updateProject: (id: string, req: ProjectUpdateRequest) => patch<Project>(`/api/projects/${id}`, req),
+  brandFacts: (id: string) => get<BrandFact[]>(`/api/projects/${id}/brand-facts`),
+  createBrandFact: (id: string, req: BrandFactCreateRequest) => post<BrandFact>(`/api/projects/${id}/brand-facts`, req),
+  updateBrandFact: (id: string, factId: string, req: Partial<Pick<BrandFact, "fact_type" | "claim" | "source_url" | "status">>) => patch<BrandFact>(`/api/projects/${id}/brand-facts/${factId}`, req),
+  questionFramework: (id: string) => get<ResearchQuestionFramework>(`/api/projects/${id}/question-framework`),
+  researchReport: (id: string) => get<ResearchReport>(`/api/projects/${id}/research-report`),
   promptSets: (id: string) => get<PromptSet[]>(`/api/projects/${id}/prompt-sets`),
   createPromptSet: (id: string, req: PromptSetCreateRequest) => post<PromptSet>(`/api/projects/${id}/prompt-sets`, req),
   createPromptSetVersion: (id: string, promptSetId: string, req: PromptSetVersionCreateRequest) => post<PromptSet>(`/api/projects/${id}/prompt-sets/${promptSetId}/versions`, req),
@@ -486,10 +658,11 @@ export const api = {
   updateWorkItem: (projectId: string, itemId: string, req: { status?: WorkItem["status"]; execution_mode?: WorkItem["execution_mode"] }) => patch<WorkItem>(`/api/projects/${projectId}/work-items/${itemId}`, req),
   createWorkItemFromDiagnosis: (projectId: string, diagnosisId: string) => post<WorkItem>(`/api/projects/${projectId}/diagnosis/${encodeURIComponent(diagnosisId)}/work-items`, {}),
   workItem: (projectId: string, itemId: string) => get<WorkItemDetail>(`/api/projects/${projectId}/work-items/${itemId}`),
-  createArtifactRevision: (projectId: string, itemId: string, req: { kind: OptimizationArtifact["kind"]; title: string; content: string; structured_content: Record<string, unknown> }) => post<OptimizationArtifact>(`/api/projects/${projectId}/work-items/${itemId}/artifacts`, req),
+  createArtifactRevision: (projectId: string, itemId: string, req: { kind: OptimizationArtifact["kind"]; title: string; content: string; structured_content: Record<string, unknown>; source_artifact_id?: string }) => post<OptimizationArtifact>(`/api/projects/${projectId}/work-items/${itemId}/artifacts`, req),
+  generateArtifact: (projectId: string, itemId: string, req: { kind: OptimizationArtifact["kind"]; engine_id: string }) => post<OptimizationArtifact>(`/api/projects/${projectId}/work-items/${itemId}/generate-artifact`, req),
   updateArtifactStatus: (projectId: string, artifactId: string, status: "approved") => patch<OptimizationArtifact>(`/api/projects/${projectId}/artifacts/${artifactId}`, { status }),
   exportArtifact: (projectId: string, artifactId: string) => post<{ filename: string; media_type: string; content: string; delivery: DeliveryRecord }>(`/api/projects/${projectId}/artifacts/${artifactId}/export`, {}),
-  createDelivery: (projectId: string, artifactId: string, req: { method: "manual" | "cms" | "repository"; status: "published"; target_url: string; notes: string }) => post<DeliveryRecord>(`/api/projects/${projectId}/artifacts/${artifactId}/deliveries`, req),
+  createDelivery: (projectId: string, artifactId: string, req: { method: "manual" | "cms" | "repository"; status: "published"; target_url: string; notes: string; retest_after_days: number }) => post<DeliveryRecord>(`/api/projects/${projectId}/artifacts/${artifactId}/deliveries`, req),
   verifyCycle: (projectId: string, cycleId: string) => post<{ cycle_id: string; status: string; verification_summary: GeoCycle["verification_summary"] }>(`/api/projects/${projectId}/cycles/${cycleId}/verify`, {}),
   saveAgentPolicy: (projectId: string, req: { enabled: boolean; generation_engine: string; approval_required: boolean; max_actions_per_run: number; per_run_budget: number; monthly_budget: number; auto_plan_on_tracking: boolean }) => put<AgentPolicy>(`/api/projects/${projectId}/agent-policy`, req),
   planAgentRun: (projectId: string, req: { cycle_id: string; goal: string }) => post<AgentRun>(`/api/projects/${projectId}/agent-runs`, req),

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
+from sqlmodel import Session
 
 _HTML = """
 <html><head><title>keeplix — GEO 平台</title>
@@ -48,9 +51,22 @@ def test_engagement_run_produces_report(client, _mock_fetch):
     assert report["summary"]  # 有 executive summary
 
 
-def test_engagement_persists_deliverable(client, _mock_fetch):
+def test_engagement_persists_deliverable(
+    client, _mock_fetch, engine, _qualified_citation_provider
+):
     # 带 project_id 时应把 Deliverable 落库
-    proj = client.post("/api/projects", json={"name": "客户A", "primary_domain": "keeplix.com"})
+    proj = client.post(
+        "/api/projects",
+        json={
+            "name": "客户A",
+            "brand_name": "keeplix",
+            "primary_domain": "keeplix.com",
+            "market": "中国大陆",
+            "category": "GEO 市场研究软件",
+            "competitors": ["竞品 GEO"],
+            "research_objective": "验证实施内容是否改善真实 AI 答案中的品牌引用。",
+        },
+    )
     project_id = proj.json()["id"]
 
     resp = client.post(
@@ -58,9 +74,10 @@ def test_engagement_persists_deliverable(client, _mock_fetch):
         json={
             "url": "https://keeplix.com",
             "brand_name": "keeplix",
-            "engine_ids": ["deepseek"],
+            "engine_ids": ["qwen"],
             "prompts": ["最好的中文 GEO 工具"],
             "brand_domains": ["keeplix.com"],
+            "competitors": ["竞品 GEO"],
             "samples": 2,
             "project_id": project_id,
         },
@@ -77,6 +94,12 @@ def test_engagement_persists_deliverable(client, _mock_fetch):
     }
 
     work_item = dashboard["work_items"][0]
+    for deferred_item in dashboard["work_items"][1:]:
+        dismissed = client.patch(
+            f"/api/projects/{project_id}/work-items/{deferred_item['id']}",
+            json={"status": "dismissed"},
+        )
+        assert dismissed.status_code == 200
     premature_done = client.patch(
         f"/api/projects/{project_id}/work-items/{work_item['id']}",
         json={"status": "done"},
@@ -93,10 +116,14 @@ def test_engagement_persists_deliverable(client, _mock_fetch):
             "title": original_artifact["title"],
             "content": f"{original_artifact['content']}\n用户修订。",
             "structured_content": original_artifact["structured_content"],
+            "source_artifact_id": original_artifact["id"],
         },
     )
     assert revision.status_code == 200
     assert revision.json()["version"] == original_artifact["version"] + 1
+    assert revision.json()["source_snapshot"]["revised_from_artifact_id"] == (
+        original_artifact["id"]
+    )
     approved = client.patch(
         f"/api/projects/{project_id}/artifacts/{revision.json()['id']}",
         json={"status": "approved"},
@@ -113,10 +140,21 @@ def test_engagement_persists_deliverable(client, _mock_fetch):
             "status": "published",
             "target_url": "https://keeplix.com/updated-page",
             "notes": "已替换首页内容",
+            "retest_after_days": 3,
         },
     )
     assert implemented.status_code == 200
     assert implemented.json()["published_at"]
+    implemented_detail = client.get(
+        f"/api/projects/{project_id}/work-items/{work_item['id']}"
+    ).json()
+    retest_plan = implemented_detail["retest_plan"]
+    assert retest_plan["status"] == "scheduled"
+    scheduled_for = datetime.fromisoformat(retest_plan["scheduled_for"])
+    published_at = datetime.fromisoformat(implemented.json()["published_at"])
+    assert timedelta(days=2, hours=23) < scheduled_for - published_at < timedelta(
+        days=3, minutes=1
+    )
 
     updated = client.patch(
         f"/api/projects/{project_id}/work-items/{work_item['id']}",
@@ -128,13 +166,35 @@ def test_engagement_persists_deliverable(client, _mock_fetch):
 
     cycle = dashboard["cycles"][0]
     assert cycle["measurement_config"]["questions"] == ["最好的中文 GEO 工具"]
-    verification = client.post(f"/api/projects/{project_id}/cycles/{cycle['id']}/verify")
-    assert verification.status_code == 200
-    comparison = verification.json()["verification_summary"]["engines"][0]
+    from keeplix.models import CycleRetestPlan
+
+    with Session(engine) as session:
+        stored_retest = session.get(CycleRetestPlan, retest_plan["id"])
+        assert stored_retest is not None
+        stored_retest.scheduled_for = datetime.now(UTC) - timedelta(minutes=1)
+        session.add(stored_retest)
+        session.commit()
+    due = client.post("/api/retests/run-due")
+    assert due.status_code == 200
+    assert due.json() == {
+        "processed": 1,
+        "completed": 1,
+        "failed": 0,
+        "plan_ids": [retest_plan["id"]],
+        "errors": {},
+    }
+    verified_detail = client.get(
+        f"/api/projects/{project_id}/work-items/{work_item['id']}"
+    ).json()
+    assert verified_detail["retest_plan"]["status"] == "complete"
+    verification_summary = client.get(f"/api/projects/{project_id}").json()["cycles"][0][
+        "verification_summary"
+    ]
+    comparison = verification_summary["engines"][0]
     assert comparison["entity_delta"] == 0
     assert comparison["citation_delta"] == 0
     assert comparison["entity_assessment"] == "unchanged"
-    assert verification.json()["verification_summary"]["changes"][0]["target_url"] == (
+    assert verification_summary["changes"][0]["target_url"] == (
         "https://keeplix.com/updated-page"
     )
 
@@ -158,7 +218,16 @@ def test_agent_requires_policy_budget_approval_and_human_publish(
     from keeplix.providers.base import EngineResponse
 
     project = client.post(
-        "/api/projects", json={"name": "Agent 客户", "primary_domain": "keeplix.com"}
+        "/api/projects",
+        json={
+            "name": "Agent 客户",
+            "brand_name": "keeplix",
+            "primary_domain": "keeplix.com",
+            "market": "中国大陆",
+            "category": "GEO 市场研究软件",
+            "competitors": ["竞品 GEO"],
+            "research_objective": "根据真实答案证据建立可审批的 GEO 优化循环。",
+        },
     ).json()
     client.post(
         "/api/engagements/run",
@@ -190,11 +259,26 @@ def test_agent_requires_policy_budget_approval_and_human_publish(
             "monthly_budget": 5.0,
         },
     )
+    missing_facts = client.post(
+        f"/api/projects/{project['id']}/agent-runs",
+        json={"cycle_id": cycle_id, "goal": "准备草稿"},
+    )
+    assert missing_facts.status_code == 400
+    assert "已验证品牌事实" in missing_facts.json()["detail"]
+    fact = client.post(
+        f"/api/projects/{project['id']}/brand-facts",
+        json={
+            "fact_type": "policy",
+            "claim": "所有 Agent 草稿都必须经过人工审批才能发布。",
+            "source_url": "https://keeplix.com/governance",
+        },
+    ).json()
     over_budget = client.post(
         f"/api/projects/{project['id']}/agent-runs",
         json={"cycle_id": cycle_id, "goal": "准备草稿"},
     )
     assert over_budget.status_code == 400
+    assert "单次预算" in over_budget.json()["detail"]
 
     policy = client.put(
         f"/api/projects/{project['id']}/agent-policy",
@@ -215,6 +299,7 @@ def test_agent_requires_policy_budget_approval_and_human_publish(
     ).json()
     assert planned["status"] == "awaiting_approval"
     assert planned["actions"]
+    assert planned["plan"]["brand_fact_ids"] == [fact["id"]]
     before_approval = client.post(
         f"/api/projects/{project['id']}/agent-runs/{planned['id']}/execute"
     )
@@ -225,10 +310,13 @@ def test_agent_requires_policy_budget_approval_and_human_publish(
     )
     assert approved.status_code == 200
 
+    captured: dict[str, str] = {}
+
     class FakeGenerationProvider:
         acquisition = "api"
 
         async def query(self, prompt):
+            captured["prompt"] = prompt
             return EngineResponse(answer_text="Agent 修订草稿，等待人工审批。")
 
     monkeypatch.setattr(
@@ -245,6 +333,9 @@ def test_agent_requires_policy_budget_approval_and_human_publish(
     output = next(artifact for artifact in detail["artifacts"] if artifact["id"] == output_id)
     assert output["created_by"] == "agent"
     assert output["status"] == "draft"
+    assert output["source_snapshot"]["brand_fact_ids"] == [fact["id"]]
+    assert fact["claim"] in captured["prompt"]
+    assert fact["source_url"] in captured["prompt"]
     direct_publish = client.post(
         f"/api/projects/{project['id']}/artifacts/{output_id}/deliveries",
         json={

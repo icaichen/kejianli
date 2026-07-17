@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session
 
 from keeplix.core.db import get_session
@@ -16,4 +16,7 @@ router = APIRouter(tags=["citations"])
 async def run_citation(
     req: CitationRunRequest, session: Session = Depends(get_session)
 ) -> CitationRunResponse:
-    return await run_citations(req, session)
+    try:
+        return await run_citations(req, session)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error

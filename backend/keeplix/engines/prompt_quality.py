@@ -6,7 +6,17 @@ from collections import Counter
 
 from keeplix.models.enums import PromptIntent
 
-_COMPARISON_MARKERS = ("对比", "比较", "区别", "哪个好", "最佳", "还是", "vs", "versus")
+_COMPARISON_MARKERS = (
+    "对比",
+    "比较",
+    "相比",
+    "区别",
+    "哪个好",
+    "最佳",
+    "还是",
+    "vs",
+    "versus",
+)
 _PROBLEM_MARKERS = (
     "如何",
     "怎么",

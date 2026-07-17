@@ -2,10 +2,15 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-import { api, type OptimizationArtifact, type WorkItemDetail } from "@/lib/api";
+import { api, type BrandFact, type EngineInfo, type OptimizationArtifact, type WorkItemDetail } from "@/lib/api";
 
 const KIND_LABEL: Record<string, string> = { content: "内容草稿", jsonld: "JSON-LD", instructions: "执行说明" };
 const STATUS_LABEL: Record<string, string> = { draft: "草稿", approved: "已审批", implemented: "已实施", superseded: "旧版本" };
+const RETEST_STATUS_LABEL: Record<string, string> = { scheduled: "已安排", running: "复测中", complete: "已完成", failed: "需重试", cancelled: "已取消" };
+
+function formatRetestTime(value: string) {
+  return new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "long", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(value));
+}
 
 function initialArtifact(kind: OptimizationArtifact["kind"], item: WorkItemDetail["item"]) {
   const evidence = item.evidence_snapshot;
@@ -31,13 +36,23 @@ export default function WorkItemPage({ params }: { params: Promise<{ id: string;
   const [deliveryMethod, setDeliveryMethod] = useState<"manual" | "cms" | "repository">("manual");
   const [targetUrl, setTargetUrl] = useState("");
   const [deliveryNotes, setDeliveryNotes] = useState("");
+  const [retestAfterDays, setRetestAfterDays] = useState(7);
   const [newKind, setNewKind] = useState<OptimizationArtifact["kind"]>("instructions");
+  const [brandFacts, setBrandFacts] = useState<BrandFact[]>([]);
+  const [generationEngines, setGenerationEngines] = useState<EngineInfo[]>([]);
+  const [generationEngine, setGenerationEngine] = useState("deepseek");
 
   useEffect(() => {
     void params.then((value) => {
       setIds(value);
-      return api.workItem(value.id, value.workItemId);
-    }).then(setDetail).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "优化工作无法读取。"));
+      return Promise.all([api.workItem(value.id, value.workItemId), api.brandFacts(value.id), api.engines()]);
+    }).then(([workDetail, facts, engines]) => {
+      setDetail(workDetail);
+      setBrandFacts(facts);
+      const connected = engines.filter((engine) => !engine.is_stub && engine.runtime_status !== "not_connected");
+      setGenerationEngines(connected);
+      if (connected.length) setGenerationEngine(connected.some((engine) => engine.id === "deepseek") ? "deepseek" : connected[0].id);
+    }).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "优化工作无法读取。"));
   }, [params]);
 
   const currentArtifacts = useMemo(() => {
@@ -67,7 +82,7 @@ export default function WorkItemPage({ params }: { params: Promise<{ id: string;
     setBusy(true); setError(null);
     try {
       const structuredContent = structured.trim() ? JSON.parse(structured) as Record<string, unknown> : {};
-      const revision = await api.createArtifactRevision(ids.id, ids.workItemId, { kind: selected.kind, title: selected.title, content, structured_content: structuredContent });
+      const revision = await api.createArtifactRevision(ids.id, ids.workItemId, { kind: selected.kind, title: selected.title, content, structured_content: structuredContent, source_artifact_id: selected.id });
       await refresh(); setSelectedId(revision.id);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "新版本保存失败。");
@@ -83,6 +98,17 @@ export default function WorkItemPage({ params }: { params: Promise<{ id: string;
       await refresh(); setSelectedId(created.id);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "无法建立可编辑产物。");
+    } finally { setBusy(false); }
+  }
+
+  async function generateFromEvidence(kind: OptimizationArtifact["kind"]) {
+    if (!ids) return;
+    setBusy(true); setError(null);
+    try {
+      const generated = await api.generateArtifact(ids.id, ids.workItemId, { kind, engine_id: generationEngine });
+      await refresh(); setSelectedId(generated.id);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "无法根据证据生成产物。");
     } finally { setBusy(false); }
   }
 
@@ -113,7 +139,7 @@ export default function WorkItemPage({ params }: { params: Promise<{ id: string;
     if (!ids || !selected) return;
     setBusy(true); setError(null);
     try {
-      await api.createDelivery(ids.id, selected.id, { method: deliveryMethod, status: "published", target_url: targetUrl, notes: deliveryNotes });
+      await api.createDelivery(ids.id, selected.id, { method: deliveryMethod, status: "published", target_url: targetUrl, notes: deliveryNotes, retest_after_days: retestAfterDays });
       await refresh();
     } catch (reason) { setError(reason instanceof Error ? reason.message : "实施记录保存失败。"); }
     finally { setBusy(false); }
@@ -127,9 +153,9 @@ export default function WorkItemPage({ params }: { params: Promise<{ id: string;
     <header className="work-detail-header"><div><span className={`severity severity-${detail.item.priority}`}>{detail.item.priority === "high" ? "高优先级" : detail.item.priority === "medium" ? "中优先级" : "低优先级"}</span><h1>{detail.item.title}</h1><p>{detail.item.detail}</p></div><div><small>执行方式</small><strong>{detail.item.execution_mode === "agent" ? "Agent" : detail.item.execution_mode === "team" ? "团队" : "用户"}</strong><small>{detail.item.evidence_snapshot.sample_size ? "正式样本" : "基线得分"}</small><strong>{detail.item.evidence_snapshot.sample_size ? `${String(detail.item.evidence_snapshot.sample_size)} 个` : String(detail.item.evidence_snapshot.baseline_score ?? "—")}</strong></div></header>
 
     <main className="work-editor-layout">
-      <aside className="artifact-nav"><span>优化产物</span>{currentArtifacts.map((artifact) => <button type="button" className={selected?.id === artifact.id ? "is-active" : ""} key={artifact.id} onClick={() => setSelectedId(artifact.id)}><b>{KIND_LABEL[artifact.kind]}</b><small>v{artifact.version} · {STATUS_LABEL[artifact.status]}</small></button>)}<div><span>证据来源</span>{detail.item.evidence_snapshot.prompt_text ? <><p>问题：{String(detail.item.evidence_snapshot.prompt_text)}</p><p>答案面：{String(detail.item.evidence_snapshot.engine_id ?? "—")}</p><p>运行：{String(detail.item.evidence_snapshot.citation_run_ids ?? "—")}</p></> : <><p>审计 {String(detail.item.evidence_snapshot.audit_run_id ?? "—")}</p><p>GEO 基线 {String(detail.item.evidence_snapshot.baseline_score ?? "—")} / 100</p></>}</div></aside>
+      <aside className="artifact-nav"><span>优化产物</span>{currentArtifacts.map((artifact) => <button type="button" className={selected?.id === artifact.id ? "is-active" : ""} key={artifact.id} onClick={() => setSelectedId(artifact.id)}><b>{KIND_LABEL[artifact.kind]}</b><small>v{artifact.version} · {STATUS_LABEL[artifact.status]}</small></button>)}<div><span>证据来源</span>{detail.item.evidence_snapshot.prompt_text ? <><p>问题：{String(detail.item.evidence_snapshot.prompt_text)}</p><p>答案面：{String(detail.item.evidence_snapshot.engine_id ?? "—")}</p><p>运行：{String(detail.item.evidence_snapshot.citation_run_ids ?? "—")}</p></> : <><p>审计 {String(detail.item.evidence_snapshot.audit_run_id ?? "—")}</p><p>GEO 基线 {String(detail.item.evidence_snapshot.baseline_score ?? "—")} / 100</p></>}<p>已核验品牌事实：{brandFacts.filter((fact) => fact.status === "verified").length} 条</p><Link href={`/projects/${ids.id}?view=optimization`}>管理事实依据 →</Link></div></aside>
 
-      {selected ? <section className="artifact-editor"><header><div><span>{KIND_LABEL[selected.kind]}</span><h2>{selected.title}</h2></div><div><span>v{selected.version}</span><b>{STATUS_LABEL[selected.status]}</b></div></header>{selected.kind === "jsonld" ? <label><span>结构化数据</span><textarea className="code-editor" value={structured} onChange={(event) => setStructured(event.target.value)} spellCheck={false} /></label> : <label><span>{selected.kind === "content" ? "可交付内容" : "执行内容"}</span><textarea value={content} onChange={(event) => setContent(event.target.value)} /></label>}<footer><button type="button" onClick={() => void saveRevision()} disabled={busy || selected.status === "implemented"}>保存新版本</button><div>{selected.status === "draft" && <button className="approve" type="button" onClick={() => void approveArtifact()} disabled={busy}>审批通过</button>}{(selected.status === "approved" || selected.status === "implemented") && <button type="button" onClick={() => void exportCurrent()} disabled={busy}>导出文件</button>}</div></footer>{selected.status === "approved" && <div className="delivery-form"><div><label><span>实施方式</span><select value={deliveryMethod} onChange={(event) => setDeliveryMethod(event.target.value as "manual" | "cms" | "repository")}><option value="manual">人工发布</option><option value="cms">CMS</option><option value="repository">代码仓库</option></select></label><label><span>实际位置</span><input value={targetUrl} onChange={(event) => setTargetUrl(event.target.value)} placeholder="https://… 或文件路径" /></label></div><label><span>实施说明</span><textarea value={deliveryNotes} onChange={(event) => setDeliveryNotes(event.target.value)} placeholder="记录具体改了什么、发布到哪里。" /></label><button type="button" onClick={() => void recordDelivery()} disabled={busy || (!targetUrl.trim() && !deliveryNotes.trim())}>记录实施并完成</button></div>}{error && <p className="cycle-action-error" role="alert">{error}</p>}</section> : <section className="artifact-start"><span>下一步</span><h2>先建立一份可审查的产物</h2><p>系统会带入当前问题与证据，但不会替你虚构产品事实。你可以先创建执行说明，再补充内容草稿或 JSON-LD。</p><label><span>产物类型</span><select value={newKind} onChange={(event) => setNewKind(event.target.value as OptimizationArtifact["kind"])}><option value="instructions">执行说明</option><option value="content">内容草稿</option><option value="jsonld">JSON-LD</option></select></label><button type="button" onClick={() => void createInitialArtifact()} disabled={busy}>{busy ? "正在建立…" : `建立${KIND_LABEL[newKind]} →`}</button>{error && <p className="cycle-action-error" role="alert">{error}</p>}</section>}
+      {selected ? <section className="artifact-editor"><header><div><span>{KIND_LABEL[selected.kind]}</span><h2>{selected.title}</h2></div><div><span>v{selected.version}</span><b>{STATUS_LABEL[selected.status]}</b></div></header><div className="artifact-provenance"><span>Brief v{String(selected.source_snapshot.brief_version ?? "—")}</span><span>事实 {Array.isArray(selected.source_snapshot.brand_fact_ids) ? selected.source_snapshot.brand_fact_ids.length : 0} 条</span><span>{selected.source_snapshot.generation_engine ? `生成引擎 ${String(selected.source_snapshot.generation_engine)}` : "用户建立"}</span>{Boolean(selected.source_snapshot.revised_from_artifact_id) && <span>继承上一版本证据</span>}</div><div className="evidence-generator"><div><span>证据化生成</span><p>使用正式诊断与 {brandFacts.filter((fact) => fact.status === "verified").length} 条已核验事实建立新版本。</p></div><select aria-label="生成引擎" value={generationEngine} onChange={(event) => setGenerationEngine(event.target.value)}>{generationEngines.length ? generationEngines.map((engine) => <option key={engine.id} value={engine.id}>{engine.display_name}</option>) : <option value="deepseek">DeepSeek</option>}</select><button type="button" onClick={() => void generateFromEvidence(selected.kind)} disabled={busy || !brandFacts.some((fact) => fact.status === "verified")}>{busy ? "正在生成…" : "根据证据生成新版"}</button></div>{selected.kind === "jsonld" ? <label><span>结构化数据</span><textarea className="code-editor" value={structured} onChange={(event) => setStructured(event.target.value)} spellCheck={false} /></label> : <label><span>{selected.kind === "content" ? "可交付内容" : "执行内容"}</span><textarea value={content} onChange={(event) => setContent(event.target.value)} /></label>}<footer><button type="button" onClick={() => void saveRevision()} disabled={busy || selected.status === "implemented"}>保存新版本</button><div>{selected.status === "draft" && <button className="approve" type="button" onClick={() => void approveArtifact()} disabled={busy}>审批通过</button>}{(selected.status === "approved" || selected.status === "implemented") && <button type="button" onClick={() => void exportCurrent()} disabled={busy}>导出文件</button>}</div></footer>{selected.status === "approved" && <div className="delivery-form"><div><label><span>实施方式</span><select value={deliveryMethod} onChange={(event) => setDeliveryMethod(event.target.value as "manual" | "cms" | "repository")}><option value="manual">人工发布</option><option value="cms">CMS</option><option value="repository">代码仓库</option></select></label><label><span>实际位置</span><input value={targetUrl} onChange={(event) => setTargetUrl(event.target.value)} placeholder="https://… 或文件路径" /></label><label><span>等待多久复测</span><select value={retestAfterDays} onChange={(event) => setRetestAfterDays(Number(event.target.value))}><option value={3}>3 天</option><option value={7}>7 天</option><option value={14}>14 天</option><option value={30}>30 天</option></select></label></div><label><span>实施说明</span><textarea value={deliveryNotes} onChange={(event) => setDeliveryNotes(event.target.value)} placeholder="记录具体改了什么、发布到哪里。" /></label><button type="button" onClick={() => void recordDelivery()} disabled={busy || (!targetUrl.trim() && !deliveryNotes.trim())}>记录实施并安排复测</button></div>}{detail.retest_plan && <div className={`retest-plan-card is-${detail.retest_plan.status}`}><div><span>复测计划 · {RETEST_STATUS_LABEL[detail.retest_plan.status]}</span><strong>{formatRetestTime(detail.retest_plan.scheduled_for)}</strong></div><p>将复用本周期冻结的问题、答案面和采样次数；结果回到项目周期中与原基线比较。</p>{detail.retest_plan.last_error && <small>{detail.retest_plan.last_error}</small>}<Link href={`/projects/${ids.id}?view=optimization`}>查看周期状态 →</Link></div>}{error && <p className="cycle-action-error" role="alert">{error}</p>}</section> : <section className="artifact-start"><span>从诊断进入执行</span><h2>建立一份可审查的产物</h2><p>生成时只使用当前问题的正式证据和项目中已核验的品牌事实；产物仍需人工审批才能实施。</p><label><span>产物类型</span><select value={newKind} onChange={(event) => setNewKind(event.target.value as OptimizationArtifact["kind"])}><option value="instructions">执行说明</option><option value="content">内容草稿</option><option value="jsonld">JSON-LD</option></select></label><label><span>生成引擎</span><select value={generationEngine} onChange={(event) => setGenerationEngine(event.target.value)}>{generationEngines.length ? generationEngines.map((engine) => <option key={engine.id} value={engine.id}>{engine.display_name}</option>) : <option value="deepseek">DeepSeek</option>}</select></label>{brandFacts.some((fact) => fact.status === "verified") ? <button type="button" onClick={() => void generateFromEvidence(newKind)} disabled={busy}>{busy ? "正在生成…" : `根据证据生成${KIND_LABEL[newKind]} →`}</button> : <p className="artifact-start-warning">尚无已核验品牌事实。<Link href={`/projects/${ids.id}?view=optimization`}>先回项目添加 →</Link></p>}<button className="artifact-template-button" type="button" onClick={() => void createInitialArtifact()} disabled={busy}>仅建立空白模板</button>{error && <p className="cycle-action-error" role="alert">{error}</p>}</section>}
 
       <aside className="artifact-history"><span>版本与审批</span>{detail.artifacts.map((artifact) => <div key={artifact.id}><i className={`status-${artifact.status}`} /><p><b>{KIND_LABEL[artifact.kind]} v{artifact.version}</b><small>{STATUS_LABEL[artifact.status]} · {artifact.created_by === "user" ? "用户" : artifact.created_by}</small></p></div>)}{detail.deliveries.length > 0 && <><span className="history-subhead">导出与实施</span>{detail.deliveries.map((delivery) => <div key={delivery.id}><i className={`status-${delivery.status}`} /><p><b>{delivery.status === "published" ? "已实施" : "已导出"}</b><small>{delivery.method}{delivery.target_url ? ` · ${delivery.target_url}` : ""}</small></p></div>)}</>}</aside>
     </main>

@@ -1,0 +1,71 @@
+version: 1
+locale: zh-CN
+
+profiles:
+  qwen:
+    surface_name: 千问联网检索 Agent
+    expected_acquisition: api
+    network_enabled: true
+    region_language: zh-CN
+    auth_mode: api_key
+    citation_availability: structured
+    measurement_scope: citation
+    formal_report_eligible: true
+    cost_note: 按千问 Agent 调用计费；采样次数越高，成本越高。
+    min_answer_chars: 20
+    require_request_id: true
+    require_citations: true
+    prompts:
+      - 请解释生成式引擎优化（GEO）是什么，并列出可核验的公开来源。
+      - 请比较 GEO 与传统 SEO 的主要区别，并给出可核验的公开来源。
+
+  kimi:
+    surface_name: Kimi K2.6 $web_search
+    expected_acquisition: api
+    network_enabled: true
+    region_language: zh-CN
+    auth_mode: api_key
+    citation_availability: urls
+    measurement_scope: citation
+    formal_report_eligible: true
+    cost_note: 按 Moonshot API 用量计费；账户余额不足时会返回 429。
+    min_answer_chars: 20
+    require_request_id: true
+    require_citations: true
+    prompts:
+      - 请解释生成式引擎优化（GEO）是什么，并列出可核验的公开来源。
+      - 请比较 GEO 与传统 SEO 的主要区别，并给出可核验的公开来源。
+
+  baidu_ernie:
+    surface_name: 百度智能搜索生成
+    expected_acquisition: api
+    network_enabled: true
+    region_language: zh-CN
+    auth_mode: api_key
+    citation_availability: structured
+    measurement_scope: citation
+    formal_report_eligible: true
+    cost_note: 按百度智能搜索调用计费；以控制台当前套餐为准。
+    min_answer_chars: 20
+    require_request_id: true
+    require_citations: true
+    prompts:
+      - 请解释生成式引擎优化（GEO）是什么，并列出可核验的公开来源。
+      - 请比较 GEO 与传统 SEO 的主要区别，并给出可核验的公开来源。
+
+  deepseek:
+    surface_name: DeepSeek Chat API
+    expected_acquisition: api
+    network_enabled: false
+    region_language: zh-CN
+    auth_mode: api_key
+    citation_availability: none
+    measurement_scope: brand_awareness
+    formal_report_eligible: false
+    cost_note: 普通聊天调用可用于品牌认知，不可替代搜索引用追踪。
+    min_answer_chars: 20
+    require_request_id: true
+    require_citations: false
+    prompts:
+      - 请用简洁中文解释生成式引擎优化（GEO）是什么。
+      - 请用简洁中文说明 GEO 与传统 SEO 的主要区别。

@@ -55,7 +55,8 @@ async def fetch(url: str, timeout: float = 20.0, use_browser: bool | None = None
     try:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
             resp = await client.get(url, headers={"User-Agent": user_agent})
-            return FetchResult(url=url, status=resp.status_code, html=resp.text)
+            final_url = str(getattr(resp, "url", url))
+            return FetchResult(url=final_url, status=resp.status_code, html=resp.text)
     except Exception as e:  # noqa: BLE001 - 网络/沙箱无网都降级，不抛 500
         log.warning("抓取失败（%s），降级为空结果：%s", url, e)
         return FetchResult(url=url, status=0, html="")

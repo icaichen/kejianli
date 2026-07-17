@@ -91,7 +91,7 @@ function AnalysesContent() {
 
       {error && <div className="error-banner" role="alert"><strong>检测没有完成</strong><p>{error}</p><button type="button" onClick={() => void run()}>重新尝试</button></div>}
       {loading && <AuditSkeleton />}
-      {data && <AuditReport brand={brand.trim()} data={data} />}
+      {data && <AuditReport brand={brand.trim()} data={data} projectId={projectId} />}
     </div>
   );
 }
@@ -104,7 +104,7 @@ function domainFromUrl(value: string) {
   }
 }
 
-function AuditReport({ brand, data }: { brand: string; data: AnalysisResponse }) {
+function AuditReport({ brand, data, projectId }: { brand: string; data: AnalysisResponse; projectId: string | null }) {
   const dimensions = Object.entries(data.breakdown).sort(([, a], [, b]) => a.score / Math.max(a.weight, 1) - b.score / Math.max(b.weight, 1));
   const highPriority = data.recommendations.filter((item) => item.severity === "high").length;
   const domain = domainFromUrl(data.url);
@@ -141,14 +141,17 @@ function AuditReport({ brand, data }: { brand: string; data: AnalysisResponse })
         </div>
       </section>
 
-      <section className="next-step-section" id="next-step">
+      {projectId ? <section className="project-return-step" id="next-step">
+        <div><span>网站基线已建立</span><h2>结果已经保存到品牌项目。</h2><p>回到项目后，可见力会根据当前状态告诉你唯一的下一步，不需要在工具之间自己选择。</p></div>
+        <Link href={`/projects/${projectId}`}>返回项目并继续 <span aria-hidden="true">→</span></Link>
+      </section> : <section className="next-step-section" id="next-step">
         <div className="result-heading"><span>下一步</span><h2>你希望如何继续？</h2><p>同一份检测结果可以进入三种不同深度的工作方式，不需要重新开始。</p></div>
         <div className="next-step-grid">
           <Link href={trackingHref} className="next-step-card"><span>01 · 持续追踪</span><h3>监测 AI 可见度</h3><p>选择目标引擎和真实用户问题，建立品牌提及与引用基线。</p><b>开始可见度采样 →</b></Link>
           <Link href={optimizerHref} className="next-step-card featured"><span>02 · 自己优化</span><h3>生成优化工作包</h3><p>把诊断、内容草稿、结构化数据和可见度采样合并成一次可执行交付。</p><b>打开优化工作台 →</b></Link>
           <div className="next-step-card"><span>03 · 交给 AI</span><h3>建立 AI 执行计划</h3><p>让 Agent 根据检测结果规划任务，生成内容并等待你的审批。</p><b className="coming-soon">执行工作流正在接入</b></div>
         </div>
-      </section>
+      </section>}
     </div>
   );
 }

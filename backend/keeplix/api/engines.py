@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlmodel import Session
 
 from keeplix.core.db import get_session
 from keeplix.providers import get_provider, list_known_engines
+from keeplix.schemas import ProviderValidationDTO, ProviderValidationReview
 from keeplix.services.engine_runtime_service import get_runtime_status
+from keeplix.services.provider_validation_service import (
+    list_provider_validations,
+    review_provider_validation,
+    run_provider_validation,
+)
 from keeplix.services.qualification_service import (
     get_qualification,
     is_formally_eligible,
@@ -97,3 +103,56 @@ def index(session: Session = Depends(get_session)) -> list[EngineInfo]:
             )
         )
     return out
+
+
+@router.post(
+    "/engines/{engine_id}/validations",
+    response_model=ProviderValidationDTO,
+    status_code=status.HTTP_201_CREATED,
+)
+async def validate_provider(
+    engine_id: str, session: Session = Depends(get_session)
+) -> ProviderValidationDTO:
+    try:
+        run = await run_provider_validation(engine_id, session)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return ProviderValidationDTO.model_validate(run, from_attributes=True)
+
+
+@router.get(
+    "/engines/{engine_id}/validations",
+    response_model=list[ProviderValidationDTO],
+)
+def validation_history(
+    engine_id: str, session: Session = Depends(get_session)
+) -> list[ProviderValidationDTO]:
+    return [
+        ProviderValidationDTO.model_validate(run, from_attributes=True)
+        for run in list_provider_validations(engine_id, session)
+    ]
+
+
+@router.post(
+    "/engines/{engine_id}/validations/{validation_id}/review",
+    response_model=ProviderValidationDTO,
+)
+def review_validation(
+    engine_id: str,
+    validation_id: str,
+    request: ProviderValidationReview,
+    session: Session = Depends(get_session),
+) -> ProviderValidationDTO:
+    try:
+        run = review_provider_validation(
+            engine_id,
+            validation_id,
+            request.decision,
+            request.notes,
+            session,
+        )
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return ProviderValidationDTO.model_validate(run, from_attributes=True)

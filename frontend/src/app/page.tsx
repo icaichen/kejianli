@@ -4,29 +4,29 @@ import { AuditEntry } from "./audit-entry";
 const layers = [
   {
     number: "01",
-    label: "看见",
-    title: "检测与追踪",
-    promise: "告诉我，现在表现如何。",
-    detail: "审计你的网站，追踪品牌在 DeepSeek、豆包、Kimi、文心、通义和海外 AI 中的提及、引用与竞争位置。",
-    action: "检测我的网站",
-    href: "/analyses",
+    label: "基线",
+    title: "AI 市场测量",
+    promise: "品牌在 AI 答案中的位置如何？",
+    detail: "围绕真实消费者与采购问题，测量品牌提及、推荐、引用来源和相对竞品份额。",
+    action: "新建研究项目",
+    href: "/start",
   },
   {
     number: "02",
-    label: "提升",
-    title: "GEO 工具箱",
-    promise: "给我做好优化需要的一切。",
-    detail: "把每个问题直接变成行动：研究用户问题、重写可引用内容、生成 FAQ 与结构化数据，并在发布前验证。",
-    action: "从建议开始优化",
-    href: "/analyses",
+    label: "洞察",
+    title: "竞争与来源分析",
+    promise: "解释品牌为何出现，竞品为何被推荐。",
+    detail: "按市场、品类、问题意图和答案面拆解推荐理由、内容主题、来源结构与证据缺口。",
+    action: "定义研究范围",
+    href: "/start",
   },
   {
     number: "03",
-    label: "托管",
-    title: "AI GEO 执行",
-    promise: "告诉我目标，持续替我完成。",
-    detail: "AI 制定计划、调用工具、生成任务与内容，等待你的审批，并根据可见度变化进入下一轮优化。",
-    action: "了解 AI 执行",
+    label: "持续",
+    title: "追踪与客户交付",
+    promise: "固定口径，持续观察市场变化。",
+    detail: "保存问题集、答案证据和趋势，为品牌团队、管理层或咨询客户提供可复查的研究结论。",
+    action: "了解持续研究",
     href: "#agent",
   },
 ];
@@ -38,9 +38,9 @@ export default function Home() {
     <>
       <section className="home-hero">
         <div className="hero-copy">
-          <div className="overline"><span>中文 GEO 平台</span><span>为答案时代而生</span></div>
-          <h1>成为 AI<br />选择的<em>答案。</em></h1>
-          <p className="hero-lede">检测你的品牌是否被 AI 理解、引用和推荐。修复最重要的问题，或者让 AI 持续替你完成 GEO 工作。</p>
+          <div className="overline"><span>企业 AI 市场研究</span><span>面向品牌与咨询团队</span></div>
+          <h1>看见 AI<br />如何<em>定义市场。</em></h1>
+          <p className="hero-lede">研究你的品牌和竞品在 AI 答案中如何被提及、推荐与引用，并让每一条市场结论都能回到真实证据。</p>
           <AuditEntry />
           <div className="engine-line" aria-label="支持的 AI 引擎">
             <span>覆盖</span>
@@ -50,22 +50,22 @@ export default function Home() {
 
         <aside className="hero-report" aria-label="示例 GEO 检测报告">
           <div className="report-head">
-            <div><small>AI 可见度检测</small><strong>yourbrand.cn</strong></div>
-            <span className="status-dot">示例报告</span>
+            <div><small>AI 市场基线</small><strong>中国个人护理 · 示例</strong></div>
+            <span className="status-dot">研究摘要</span>
           </div>
           <div className="report-score">
-            <div><small>综合可见度</small><strong>72<span>/100</span></strong></div>
+            <div><small>品牌答案份额</small><strong>32<span>%</span></strong></div>
             <div className="score-explain">
-              <p><b>基础良好。</b>品牌信息可以被理解，但缺少容易被引用的权威表达。</p>
-              <div className="score-track"><i style={{ width: "72%" }} /></div>
-              <small>高于同类项目中的多数基础页面</small>
+              <p><b>品类认知较强。</b>但在问题型查询中，竞品更常因具体功效和第三方来源被推荐。</p>
+              <div className="score-track"><i style={{ width: "32%" }} /></div>
+              <small>基于同一问题集中的品牌与竞品提及份额</small>
             </div>
           </div>
           <div className="report-signals">
             {[
-              ["实体清晰度", "86%"],
-              ["引用准备度", "61%"],
-              ["内容权威性", "58%"],
+              ["品牌提及率", "46%"],
+              ["最高竞品", "38%"],
+              ["自有来源引用", "18%"],
             ].map(([label, value], index) => (
               <div className="signal" key={label}>
                 <span>{String(index + 1).padStart(2, "0")}</span>
@@ -76,21 +76,21 @@ export default function Home() {
           </div>
           <div className="report-finding">
             <span className="finding-index">01</span>
-            <div><small>最高影响问题</small><h2>缺少可引用的品牌定义</h2><p>页面介绍了功能，却没有一句能够让 AI 直接提取和引用的清晰定义。</p></div>
+            <div><small>最高影响洞察</small><h2>敏感肌问题中，竞品更常被推荐</h2><p>差距主要来自功效证据和第三方专业来源，而不是品牌知名度本身。</p></div>
           </div>
         </aside>
       </section>
 
       <section className="promise-strip">
-        <p>一个项目，完成从检测到增长的整个循环。</p>
-        <span>检测</span><i>→</i><span>优化</span><i>→</i><span>执行</span><i>→</i><span>再验证</span>
+        <p>一个研究项目，保持从问题到结论的完整证据链。</p>
+        <span>研究范围</span><i>→</i><span>答案采样</span><i>→</i><span>竞争洞察</span><i>→</i><span>持续追踪</span>
       </section>
 
       <section className="product-section" id="product">
         <div className="section-heading">
           <div className="overline"><span>三层产品</span><span>一个持续升级的旅程</span></div>
-          <h2>从看见问题，<br />到把事情<em>做完。</em></h2>
-          <p>你不需要先理解复杂的 GEO 工具。先从一次检测开始，再决定自己优化、持续追踪，还是把执行交给 AI。</p>
+          <h2>从商业问题，<br />到可交付的<em>市场证据。</em></h2>
+          <p>咨询顾问和品牌团队先定义市场、品类、品牌与竞品，再用一致口径采样、分析和追踪 AI 答案。</p>
         </div>
         <div className="layer-list">
           {layers.map((layer) => (
@@ -105,18 +105,18 @@ export default function Home() {
 
       <section className="agent-section" id="agent">
         <div className="agent-intro">
-          <div className="overline overline-light"><span>AI GEO 执行</span><span>不是另一个聊天框</span></div>
-          <h2>你给目标，<br />可见力负责<em>循环。</em></h2>
-          <p>AI Agent 读取检测结果，制定优先级，调用优化工具，生成可审批的任务，并通过下一轮检测验证真实变化。</p>
-          <Link href="/analyses" className="light-action">先建立我的基线 <span aria-hidden="true">↗</span></Link>
+          <div className="overline overline-light"><span>持续研究工作流</span><span>不是一次性截图</span></div>
+          <h2>你定义问题，<br />可见力保持<em>研究口径。</em></h2>
+          <p>固定市场、品牌、竞品、问题集和答案面，持续保存原始证据与变化，让团队和客户可以复查每一条结论。</p>
+          <Link href="/start" className="light-action">建立第一份研究 Brief <span aria-hidden="true">↗</span></Link>
         </div>
         <ol className="agent-loop">
           {[
-            ["诊断", "找到最影响 AI 引用和推荐的问题"],
-            ["计划", "按预期影响、工作量和风险安排任务"],
-            ["执行", "生成内容、结构化数据和发布建议"],
-            ["审批", "由你决定修改、发布或跳过"],
-            ["验证", "重新检测并进入下一轮优化"],
+            ["定义", "明确客户、市场、品类、品牌和竞争范围"],
+            ["采样", "用固定问题集收集真实 AI 答案"],
+            ["核验", "保存请求、答案、来源和采集条件"],
+            ["解释", "比较品牌份额、推荐理由和来源差距"],
+            ["追踪", "用相同口径观察变化并形成汇报"],
           ].map(([title, detail], index) => (
             <li key={title}><span>{String(index + 1).padStart(2, "0")}</span><div><strong>{title}</strong><p>{detail}</p></div></li>
           ))}

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session, SQLModel, create_engine
@@ -52,8 +54,40 @@ def client(engine, monkeypatch):
 
 
 @pytest.fixture
-def _qualified_citation_provider(monkeypatch):
+def _qualified_citation_provider(engine, monkeypatch):
+    from keeplix.models import Engine, EngineQualification
+    from keeplix.models.enums import Acquisition
     from keeplix.providers.base import CitedSource, EngineResponse
+
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        for engine_id, display_name in (
+            ("qwen", "通义千问"),
+            ("kimi", "Kimi"),
+            ("baidu_ernie", "文心一言"),
+        ):
+            session.add(
+                Engine(
+                    id=engine_id,
+                    display_name=display_name,
+                    acquisition=Acquisition.api,
+                )
+            )
+            session.add(
+                EngineQualification(
+                    engine_id=engine_id,
+                    surface_name=display_name,
+                    expected_acquisition="api",
+                    network_enabled=True,
+                    citation_availability="structured",
+                    measurement_scope="citation",
+                    validation_status="accepted",
+                    report_eligible=True,
+                    last_validated_at=datetime.now(UTC),
+                    validation_notes="测试夹具中的人工验收记录。",
+                )
+            )
+        session.commit()
 
     class QualifiedProvider:
         acquisition = "api"
@@ -67,7 +101,12 @@ def _qualified_citation_provider(monkeypatch):
             return EngineResponse(
                 answer_text=f"{self.brand_name} 可以回答：{prompt}",
                 cited_sources=[CitedSource(url="https://keeplix.com")],
-                raw={"provider": "qualified-test", "request_id": f"{self.engine_id}-1"},
+                raw={
+                    "provider": "qualified-test",
+                    "request_id": f"{self.engine_id}-1",
+                    "model": "qualified-test-model",
+                    "citation_enabled": True,
+                },
             )
 
     def provider(engine_id: str, **kwargs):
@@ -76,3 +115,4 @@ def _qualified_citation_provider(monkeypatch):
     monkeypatch.setattr("keeplix.agents.citation_agent.get_provider", provider)
     monkeypatch.setattr("keeplix.services.citation_service.get_provider", provider)
     monkeypatch.setattr("keeplix.api.engines.get_provider", provider)
+    monkeypatch.setattr("keeplix.services.provider_validation_service.get_provider", provider)

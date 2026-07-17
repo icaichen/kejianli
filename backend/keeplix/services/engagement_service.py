@@ -17,6 +17,7 @@ from keeplix.models import (
     Deliverable,
     GeoCycle,
     OptimizationArtifact,
+    Project,
     Recommendation,
     WorkItem,
 )
@@ -51,11 +52,17 @@ def _executive_summary(total: int, recs: list, sov_results: list) -> str:
 async def run_engagement(req: EngagementRequest, session: Session) -> EngagementResponse:
     samples = req.samples or get_settings().citation_samples
     cycle: GeoCycle | None = None
+    brief_version = 1
 
     if req.project_id:
+        project = session.get(Project, req.project_id)
+        if project is None:
+            raise ValueError("项目不存在")
+        brief_version = project.brief_version
         cycle = GeoCycle(
             project_id=req.project_id,
             name=f"优化周期 {datetime.now(UTC).strftime('%Y-%m-%d')}",
+            measurement_config={"brief_version": project.brief_version},
         )
         session.add(cycle)
         session.commit()
@@ -130,6 +137,7 @@ async def run_engagement(req: EngagementRequest, session: Session) -> Engagement
                     "audit_run_id": analysis.audit_run_id,
                     "baseline_score": analysis.total,
                     "dimension": recommendation.dimension,
+                    "brief_version": brief_version,
                 },
                 output_snapshot={
                     "generated_content": generated.generated_content if generated else None,
@@ -141,6 +149,7 @@ async def run_engagement(req: EngagementRequest, session: Session) -> Engagement
                 "audit_run_id": analysis.audit_run_id,
                 "baseline_score": analysis.total,
                 "recommendation_id": recommendation.id,
+                "brief_version": brief_version,
             }
             if generated and generated.generated_content:
                 session.add(
@@ -180,6 +189,7 @@ async def run_engagement(req: EngagementRequest, session: Session) -> Engagement
                 )
         cycle.stage = "improve"
         cycle.measurement_config = {
+            "brief_version": brief_version,
             "questions": req.prompts,
             "engine_ids": req.engine_ids,
             "samples": samples,

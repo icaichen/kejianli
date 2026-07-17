@@ -3,89 +3,100 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from functools import cache
+from pathlib import Path
+from typing import TypedDict, cast
 
+import yaml
 from sqlmodel import Session, select
 
-from keeplix.models import EngineQualification
+from keeplix.models import Engine, EngineQualification
+from keeplix.models.enums import Acquisition
+from keeplix.providers import list_known_engines
 
-QUALIFICATION_DEFAULTS: dict[str, dict[str, object]] = {
-    "qwen": {
-        "surface_name": "千问联网检索 Agent",
-        "expected_acquisition": "api",
-        "network_enabled": True,
-        "citation_availability": "structured",
-        "measurement_scope": "citation",
-        "validation_status": "accepted",
-        "report_eligible": True,
-        "validation_notes": "已对照真实联网回答、引用 URL、请求 ID 与原始 SSE 事件。",
-        "cost_note": "按千问 Agent 调用计费；采样次数越高，成本越高。",
-    },
-    "kimi": {
-        "surface_name": "Kimi K2.6 $web_search",
-        "expected_acquisition": "api",
-        "network_enabled": True,
-        "citation_availability": "urls",
-        "measurement_scope": "citation",
-        "validation_status": "accepted",
-        "report_eligible": True,
-        "validation_notes": "已验收两阶段联网搜索事件、来源 URL 与请求 ID。",
-        "cost_note": "按 Moonshot API 用量计费；账户余额不足时会返回 429。",
-    },
-    "baidu_ernie": {
-        "surface_name": "百度智能搜索生成",
-        "expected_acquisition": "api",
-        "network_enabled": True,
-        "citation_availability": "structured",
-        "measurement_scope": "citation",
-        "validation_status": "accepted",
-        "report_eligible": True,
-        "validation_notes": "已验收联网回答、结构化 references 与请求 ID。",
-        "cost_note": "按百度智能搜索调用计费；以控制台当前套餐为准。",
-    },
-    "deepseek": {
-        "surface_name": "DeepSeek Chat API",
-        "expected_acquisition": "api",
-        "network_enabled": False,
-        "citation_availability": "none",
-        "measurement_scope": "brand_awareness",
-        "validation_status": "accepted",
-        "report_eligible": False,
-        "validation_notes": "仅验收普通模型回答采样，不具备搜索引用报告资格。",
-        "cost_note": "普通聊天调用可用于品牌认知，不可替代搜索引用追踪。",
-    },
-}
+_PROFILE_PATH = Path(__file__).parents[1] / "config" / "provider_validation.zh.yaml"
+
+
+class ValidationProfile(TypedDict):
+    surface_name: str
+    expected_acquisition: str
+    network_enabled: bool
+    region_language: str
+    auth_mode: str
+    citation_availability: str
+    measurement_scope: str
+    formal_report_eligible: bool
+    cost_note: str
+    min_answer_chars: int
+    require_request_id: bool
+    require_citations: bool
+    prompts: list[str]
+
+
+@cache
+def load_validation_profiles() -> tuple[int, dict[str, ValidationProfile]]:
+    with _PROFILE_PATH.open(encoding="utf-8") as config_file:
+        data = yaml.safe_load(config_file)
+    if not isinstance(data, dict) or not isinstance(data.get("profiles"), dict):
+        raise ValueError("Provider 验证配置格式无效")
+    version = int(data.get("version", 1))
+    return version, cast(dict[str, ValidationProfile], data["profiles"])
+
+
+def get_validation_profile(engine_id: str) -> tuple[int, ValidationProfile] | None:
+    version, profiles = load_validation_profiles()
+    profile = profiles.get(engine_id)
+    return (version, profile) if profile else None
+
+
+def _ensure_engine(engine_id: str, session: Session) -> Engine:
+    engine = session.get(Engine, engine_id)
+    if engine is not None:
+        return engine
+    profile_entry = get_validation_profile(engine_id)
+    expected = profile_entry[1]["expected_acquisition"] if profile_entry else "stub"
+    try:
+        acquisition = Acquisition(expected)
+    except ValueError:
+        acquisition = Acquisition.stub
+    engine = Engine(
+        id=engine_id,
+        display_name=list_known_engines().get(engine_id, engine_id),
+        acquisition=acquisition,
+    )
+    session.add(engine)
+    session.commit()
+    session.refresh(engine)
+    return engine
 
 
 def get_qualification(engine_id: str, session: Session) -> EngineQualification:
+    _ensure_engine(engine_id, session)
     qualification = session.get(EngineQualification, engine_id)
+    profile_entry = get_validation_profile(engine_id)
+    profile = profile_entry[1] if profile_entry else None
     if qualification:
-        # Backfill non-decision display metadata for rows created before the
-        # qualification matrix was exposed. Do not change acceptance status.
-        defaults = QUALIFICATION_DEFAULTS.get(engine_id, {})
-        if not qualification.cost_note and defaults.get("cost_note"):
-            qualification.cost_note = str(defaults["cost_note"])
+        if not qualification.cost_note and profile:
+            qualification.cost_note = profile["cost_note"]
             qualification.updated_at = datetime.now(UTC)
             session.add(qualification)
             session.commit()
             session.refresh(qualification)
         return qualification
-    defaults = QUALIFICATION_DEFAULTS.get(engine_id, {})
+
     qualification = EngineQualification(
         engine_id=engine_id,
-        surface_name=str(defaults.get("surface_name", engine_id)),
-        expected_acquisition=str(defaults.get("expected_acquisition", "stub")),
-        network_enabled=bool(defaults.get("network_enabled", False)),
-        citation_availability=str(defaults.get("citation_availability", "none")),
-        measurement_scope=str(defaults.get("measurement_scope", "stub")),
-        validation_status=str(defaults.get("validation_status", "pending")),
-        report_eligible=bool(defaults.get("report_eligible", False)),
-        last_validated_at=(
-            datetime(2026, 7, 12, tzinfo=UTC)
-            if defaults.get("validation_status") == "accepted"
-            else None
-        ),
-        validation_notes=str(defaults.get("validation_notes", "尚未完成人工对照验收。")),
-        cost_note=str(defaults.get("cost_note", "当前未提供正式成本说明。")),
+        surface_name=profile["surface_name"] if profile else engine_id,
+        expected_acquisition=profile["expected_acquisition"] if profile else "stub",
+        network_enabled=profile["network_enabled"] if profile else False,
+        region_language=profile["region_language"] if profile else "zh-CN",
+        auth_mode=profile["auth_mode"] if profile else "api_key",
+        citation_availability=profile["citation_availability"] if profile else "none",
+        measurement_scope=profile["measurement_scope"] if profile else "stub",
+        validation_status="pending",
+        report_eligible=False,
+        validation_notes="尚未完成带证据的 Provider 验证与人工审核。",
+        cost_note=profile["cost_note"] if profile else "当前未提供正式成本说明。",
     )
     session.add(qualification)
     session.commit()

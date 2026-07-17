@@ -66,15 +66,22 @@ class EngineProvider(Protocol):
 | engine_id | 名称 | 建议 acquisition | citation 可得性 | 本轮状态 |
 |---|---|---|---|---|
 | `deepseek` | DeepSeek | api | 当前仅普通 Chat 回答；未验证联网引用 | **真实品牌认知采样，不可作 Citation 追踪** |
-| `qwen` | 千问联网检索 Agent | api | 强制联网、返回引用，原始 SSE 证据可保存 | **真实答案面（已验收）** |
-| `kimi` | Kimi K2.6 官方 `$web_search` | api | 真实联网回答与来源 URL；两阶段原始证据可保存 | **真实答案面（已验收）** |
-| `baidu_ernie` | 百度智能搜索生成 | api | 返回结构化 `references` | **真实答案面（已验收）** |
+| `qwen` | 千问联网检索 Agent | api | 强制联网、返回引用，原始 SSE 证据可保存 | **已接入，需在当前环境验证并人工审核** |
+| `kimi` | Kimi K2.6 官方 `$web_search` | api | 真实联网回答与来源 URL；两阶段原始证据可保存 | **已接入，需在当前环境验证并人工审核** |
+| `baidu_ernie` | 百度智能搜索生成 | api | 返回结构化 `references` | **已接入，需在当前环境验证并人工审核** |
 | `doubao` | 豆包 | browser/api | C 端偏抓取 | stub |
 | `yuanbao` | 腾讯元宝 | browser | 微信生态 | stub |
 | `chatgpt` | ChatGPT | api（需代理） | search 模式返回来源 | stub |
 | `perplexity` | Perplexity | api | 原生带 citation | stub |
 
-> 千问、Kimi、百度智能搜索生成已通过真实联网及来源保存验收。真实连通不等于有 GEO 报告资格：必须通过 [roadmap.md](roadmap.md) 的真实答案面、证据保存和人工对照验收。**接一个新引擎不仅要改 providers/ + registry，还必须完成该验收。**
+> 千问、Kimi、百度智能搜索生成已具备真实联网与来源保存能力，但代码内不再预置“已验收”。当前环境必须运行固定验证题集并完成人工审核。**接一个新引擎不仅要改 providers/ + registry，还必须补验证配置并完成该验收。**
+
+### 4.1 验证与人工审核
+
+1. `POST /api/engines/{engine_id}/validations` 使用固定题集运行真实 Provider 检查。
+2. `GET /api/engines/{engine_id}/validations` 查看答案、引用、请求标识和检查结果。
+3. `POST /api/engines/{engine_id}/validations/{validation_id}/review` 提交 `accepted` 或 `rejected` 及审核说明。
+4. 只有最新、自动检查通过且人工接受的记录可更新资格；新一轮验证开始时资格先回到 `pending`。
 
 ## 5. StubProvider 为什么重要
 

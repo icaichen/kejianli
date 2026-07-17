@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from calendar import monthrange
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -13,9 +14,11 @@ from sqlmodel import Session, col, select
 from keeplix.engines.prompt_quality import classify_prompt, summarize_prompt_quality
 from keeplix.models import (
     BrandEntity,
+    BrandFact,
     CitationResult,
     CitationRun,
     Client,
+    CycleRetestPlan,
     DeliveryRecord,
     GeoCycle,
     OptimizationArtifact,
@@ -35,10 +38,12 @@ from keeplix.schemas import (
     ArtifactStatusUpdate,
     CitationEvidence,
     CitationRunRequest,
+    CycleRetestPlanDTO,
     CycleVerificationResponse,
     DeliveryRecordCreate,
     DeliveryRecordDTO,
     DiagnosisSummary,
+    DueRetestResponse,
     DueTrackingResponse,
     GeoCycleDTO,
     OptimizationArtifactDTO,
@@ -46,6 +51,7 @@ from keeplix.schemas import (
     ProjectCreate,
     ProjectDashboard,
     ProjectResponse,
+    ProjectUpdate,
     PromptSetCreate,
     PromptSetResponse,
     PromptSetVersionCreate,
@@ -61,6 +67,10 @@ from keeplix.schemas import (
 )
 from keeplix.services.agent_service import get_agent_policy, list_agent_runs
 from keeplix.services.citation_service import run_citations
+from keeplix.services.research_scope_service import (
+    incomplete_brief_message,
+    research_brief_missing_fields,
+)
 
 _DEFAULT_ORG = "keeplix-default-org"
 _TRACKING_LEASE_DURATION = timedelta(minutes=30)
@@ -165,11 +175,15 @@ def _diagnose_visibility(project_id: str, session: Session) -> DiagnosisSummary:
     happened in a specific answer surface and links the evidence; deciding how to
     improve it remains a separate, approved Phase 2 action.
     """
+    project = session.get(Project, project_id)
+    if project is None:
+        return DiagnosisSummary(warnings=["项目不存在。"])
     rows = session.exec(
         select(CitationResult, CitationRun)
         .join(CitationRun, col(CitationResult.citation_run_id) == col(CitationRun.id))
         .where(
             CitationRun.project_id == project_id,
+            CitationRun.brief_version == project.brief_version,
             CitationRun.report_eligible,
             CitationRun.status == "done",
         )
@@ -306,32 +320,129 @@ def create_project(req: ProjectCreate, session: Session) -> ProjectResponse:
         name=req.name,
         primary_domain=req.primary_domain,
         locale=req.locale,
+        market=req.market,
+        category=req.category,
+        research_objective=req.research_objective,
     )
     session.add(project)
+    session.flush()
+    session.add(
+        BrandEntity(
+            project_id=project.id,
+            brand_name=req.brand_name.strip() or req.name,
+            domains=[req.primary_domain] if req.primary_domain else [],
+            competitors=list(dict.fromkeys(req.competitors)),
+        )
+    )
     session.commit()
     session.refresh(project)
+    return _project_response(project, session)
 
+
+def _project_response(project: Project, session: Session) -> ProjectResponse:
+    client = session.get(Client, project.client_id)
+    brand = session.exec(
+        select(BrandEntity).where(BrandEntity.project_id == project.id)
+    ).first()
+    missing_fields = research_brief_missing_fields(project, brand)
     return ProjectResponse(
         id=project.id,
         name=project.name,
+        client_name=client.name if client else "default",
+        brand_name=brand.brand_name if brand else project.name,
+        competitors=brand.competitors if brand else [],
         primary_domain=project.primary_domain,
         locale=project.locale,
+        market=project.market,
+        category=project.category,
+        research_objective=project.research_objective,
+        brief_version=project.brief_version,
+        brief_ready=not missing_fields,
+        brief_missing_fields=missing_fields,
         status=project.status,
     )
 
 
 def list_projects(session: Session) -> list[ProjectResponse]:
     projects = session.exec(select(Project)).all()
-    return [
-        ProjectResponse(
-            id=p.id,
-            name=p.name,
-            primary_domain=p.primary_domain,
-            locale=p.locale,
-            status=p.status,
-        )
-        for p in projects
-    ]
+    return [_project_response(project, session) for project in projects]
+
+
+def update_project(
+    project_id: str,
+    req: ProjectUpdate,
+    session: Session,
+) -> ProjectResponse | None:
+    project = session.get(Project, project_id)
+    if project is None:
+        return None
+    brand = session.exec(
+        select(BrandEntity).where(BrandEntity.project_id == project_id)
+    ).first()
+    if brand is None:
+        brand = BrandEntity(project_id=project_id, brand_name=project.name)
+
+    normalized_competitors = (
+        list(dict.fromkeys(name.strip() for name in req.competitors if name.strip()))
+        if req.competitors is not None
+        else brand.competitors
+    )
+    requested_scope = (
+        req.brand_name.strip() if req.brand_name is not None else brand.brand_name,
+        req.primary_domain.strip() if req.primary_domain is not None else project.primary_domain,
+        req.market.strip() if req.market is not None else project.market,
+        req.category.strip() if req.category is not None else project.category,
+        req.research_objective.strip()
+        if req.research_objective is not None
+        else project.research_objective,
+        normalized_competitors,
+    )
+    current_scope = (
+        brand.brand_name,
+        project.primary_domain,
+        project.market,
+        project.category,
+        project.research_objective,
+        brand.competitors,
+    )
+    scope_changed = requested_scope != current_scope
+
+    if req.primary_domain is not None:
+        project.primary_domain = req.primary_domain.strip()
+        brand.domains = [project.primary_domain] if project.primary_domain else []
+    if req.market is not None:
+        project.market = req.market.strip()
+    if req.category is not None:
+        project.category = req.category.strip()
+    if req.research_objective is not None:
+        project.research_objective = req.research_objective.strip()
+    if req.brand_name is not None:
+        brand.brand_name = req.brand_name.strip()
+    if req.competitors is not None:
+        brand.competitors = normalized_competitors
+
+    if scope_changed:
+        project.brief_version += 1
+        plans = session.exec(
+            select(TrackingPlan).where(
+                TrackingPlan.project_id == project_id,
+                TrackingPlan.status == "active",
+            )
+        ).all()
+        for plan in plans:
+            prompt_set = session.get(PromptSet, plan.prompt_set_id)
+            if prompt_set is not None and prompt_set.brief_version < project.brief_version:
+                plan.status = "paused"
+                plan.next_run_at = None
+                plan.last_error = "研究 Brief 已更新；请基于当前范围建立新问题集和追踪计划。"
+                plan.updated_at = datetime.now(UTC)
+                session.add(plan)
+
+    session.add(project)
+    session.add(brand)
+    session.commit()
+    session.refresh(project)
+    return _project_response(project, session)
 
 
 def create_prompt_set(
@@ -374,6 +485,9 @@ def _create_prompt_set(
     if project is None:
         raise ValueError("项目不存在")
     brand = session.exec(select(BrandEntity).where(BrandEntity.project_id == project_id)).first()
+    missing_fields = research_brief_missing_fields(project, brand)
+    if missing_fields:
+        raise ValueError(incomplete_brief_message(missing_fields))
     brand_name = brand.brand_name if brand else project.name
     aliases = brand.aliases if brand else []
     previous = session.exec(
@@ -385,6 +499,7 @@ def _create_prompt_set(
         name=name,
         version=len(previous) + 1,
         kind=kind,
+        brief_version=project.brief_version,
     )
     session.add(prompt_set)
     session.flush()
@@ -412,6 +527,8 @@ def _create_prompt_set(
         version=prompt_set.version,
         kind=prompt_set.kind,
         active=prompt_set.active,
+        brief_version=prompt_set.brief_version,
+        scope_current=prompt_set.brief_version == project.brief_version,
         prompts=prompts,
         prompt_items=[
             {"id": prompt.id, "text": prompt.text, "intent": prompt.intent.value}
@@ -446,6 +563,8 @@ def list_prompt_sets(project_id: str, session: Session) -> list[PromptSetRespons
                 version=prompt_set.version,
                 kind=prompt_set.kind,
                 active=prompt_set.active,
+                brief_version=prompt_set.brief_version,
+                scope_current=bool(project and prompt_set.brief_version == project.brief_version),
                 prompts=prompts,
                 prompt_items=[
                     {"id": prompt.id, "text": prompt.text, "intent": prompt.intent.value}
@@ -463,13 +582,22 @@ def create_tracking_plan(
     req: TrackingPlanCreate,
     session: Session,
 ) -> TrackingPlanResponse:
-    if session.get(Project, project_id) is None:
+    project = session.get(Project, project_id)
+    if project is None:
         raise ValueError("项目不存在")
+    brand = session.exec(
+        select(BrandEntity).where(BrandEntity.project_id == project_id)
+    ).first()
+    missing_fields = research_brief_missing_fields(project, brand)
+    if missing_fields:
+        raise ValueError(incomplete_brief_message(missing_fields))
     prompt_set = session.get(PromptSet, req.prompt_set_id)
     if prompt_set is None or prompt_set.project_id != project_id:
         raise ValueError("问题集不存在")
     if not prompt_set.active:
         raise ValueError("该问题集已被新版本替代，请使用当前版本创建追踪计划")
+    if prompt_set.brief_version != project.brief_version:
+        raise ValueError("该问题集属于旧研究 Brief，请先基于当前范围创建新问题集")
 
     plan = TrackingPlan(
         project_id=project_id,
@@ -526,6 +654,9 @@ def _tracking_plan_response(
         samples=plan.samples,
         cadence=plan.cadence,
         status=plan.status,
+        scope_current=bool(
+            project and prompt_set and prompt_set.brief_version == project.brief_version
+        ),
         next_run_at=plan.next_run_at,
         last_run_at=plan.last_run_at,
         last_error=plan.last_error,
@@ -566,6 +697,14 @@ async def execute_tracking_plan(
     prompt_set = session.get(PromptSet, plan.prompt_set_id)
     if project is None or prompt_set is None:
         raise ValueError("追踪计划的项目或问题集不存在")
+    brand = session.exec(
+        select(BrandEntity).where(BrandEntity.project_id == project_id)
+    ).first()
+    missing_fields = research_brief_missing_fields(project, brand)
+    if missing_fields:
+        raise ValueError(incomplete_brief_message(missing_fields))
+    if prompt_set.brief_version != project.brief_version:
+        raise ValueError("追踪计划属于旧研究 Brief，请基于当前范围建立新计划")
     prompts = [
         prompt.text
         for prompt in session.exec(
@@ -574,7 +713,6 @@ async def execute_tracking_plan(
     ]
     if not prompts:
         raise ValueError("追踪计划没有可用问题")
-    brand = session.exec(select(BrandEntity).where(BrandEntity.project_id == project_id)).first()
     brand_name = brand.brand_name if brand else project.name
     aliases = brand.aliases if brand else []
     domains = (
@@ -705,6 +843,67 @@ async def run_due_tracking_plans(session: Session) -> DueTrackingResponse:
     return DueTrackingResponse(checked_at=now, executions=executions)
 
 
+def _visibility_comparisons(scores: Sequence[VisibilityScore]) -> dict[str, dict]:
+    """Describe whether each formal snapshot can support a trend claim.
+
+    A tracking plan freezes its prompt set, engines and sample target. We still
+    require the observed answer surface, acquisition path and measurement scope
+    to match, because changing any of those creates a new measurement baseline.
+    Ad-hoc runs remain useful current evidence but never become a trend series.
+    """
+    grouped: dict[tuple[str, str, int], list[VisibilityScore]] = {}
+    comparisons: dict[str, dict] = {}
+    for score in scores:
+        if score.tracking_plan_id is None:
+            comparisons[score.id] = {
+                "comparison_status": "standalone",
+                "comparison_note": "单次检测未绑定追踪计划，不计算趋势。",
+            }
+            continue
+        grouped.setdefault(
+            (score.tracking_plan_id, score.engine_id, score.brief_version), []
+        ).append(score)
+
+    for values in grouped.values():
+        ordered = sorted(values, key=lambda item: item.period)
+        for index, score in enumerate(ordered):
+            if index == 0:
+                comparisons[score.id] = {
+                    "comparison_status": "baseline",
+                    "comparison_note": "这是该追踪范围在此答案面的首次正式基线。",
+                }
+                continue
+            previous = ordered[index - 1]
+            current_scope = (
+                score.surface_name,
+                score.provider_acquisition,
+                score.measurement_scope,
+            )
+            previous_scope = (
+                previous.surface_name,
+                previous.provider_acquisition,
+                previous.measurement_scope,
+            )
+            if current_scope != previous_scope:
+                comparisons[score.id] = {
+                    "comparison_status": "scope_changed",
+                    "comparison_note": "答案面或采集范围发生变化，本次结果作为新基线，不计算升降。",
+                    "previous_period": previous.period,
+                }
+                continue
+            note = "问题集、答案面和采集范围一致，可与上次正式结果比较。"
+            if score.sample_size != previous.sample_size:
+                note += " 两次有效样本量不同，解读时应同时参考置信区间。"
+            comparisons[score.id] = {
+                "comparison_status": "comparable",
+                "comparison_note": note,
+                "previous_period": previous.period,
+                "entity_delta": score.entity_sov - previous.entity_sov,
+                "citation_delta": score.citation_sov - previous.citation_sov,
+            }
+    return comparisons
+
+
 def get_project_dashboard(project_id: str, session: Session) -> ProjectDashboard | None:
     project = session.get(Project, project_id)
     if project is None:
@@ -719,6 +918,7 @@ def get_project_dashboard(project_id: str, session: Session) -> ProjectDashboard
         .order_by(col(VisibilityScore.period).desc())
         .limit(24)
     ).all()
+    comparison_by_score = _visibility_comparisons(scores)
     run_count = len(
         session.exec(select(CitationRun.id).where(CitationRun.project_id == project_id)).all()
     )
@@ -740,25 +940,30 @@ def get_project_dashboard(project_id: str, session: Session) -> ProjectDashboard
         .where(GeoCycle.project_id == project_id)
         .order_by(col(GeoCycle.started_at).desc())
     ).all()
+    retests = session.exec(
+        select(CycleRetestPlan)
+        .where(CycleRetestPlan.project_id == project_id)
+        .order_by(col(CycleRetestPlan.created_at).desc())
+    ).all()
+    latest_retest_by_cycle: dict[str, CycleRetestPlan] = {}
+    for retest in retests:
+        latest_retest_by_cycle.setdefault(retest.cycle_id, retest)
     work_items = session.exec(
         select(WorkItem)
         .where(WorkItem.project_id == project_id)
         .order_by(col(WorkItem.created_at).desc())
     ).all()
 
+    project_response = _project_response(project, session)
     return ProjectDashboard(
-        id=project.id,
-        name=project.name,
-        primary_domain=project.primary_domain,
-        locale=project.locale,
-        status=project.status,
+        **project_response.model_dump(),
         citation_runs=run_count,
         visibility=[
             VisibilitySnapshot(
                 engine_id=score.engine_id,
                 surface_name=score.surface_name or score.engine_id,
-                acquisition="api",
-                measurement_scope="citation",
+                acquisition=score.provider_acquisition,
+                measurement_scope=score.measurement_scope,
                 report_eligible=score.report_eligible,
                 measurement_quality=score.measurement_quality,
                 entity_sov=score.entity_sov,
@@ -773,6 +978,9 @@ def get_project_dashboard(project_id: str, session: Session) -> ProjectDashboard
                 citation_ci_high=score.citation_ci_high,
                 period=score.period,
                 tracking_plan_id=score.tracking_plan_id,
+                brief_version=score.brief_version,
+                scope_current=score.brief_version == project.brief_version,
+                **comparison_by_score[score.id],
             )
             for score in scores
         ],
@@ -789,9 +997,12 @@ def get_project_dashboard(project_id: str, session: Session) -> ProjectDashboard
                 own_domain_cited=result.own_domain_cited,
                 competitor_mentions=result.competitor_mentions,
                 request_id=(result.provider_metadata or {}).get("request_id"),
+                provider_metadata=result.provider_metadata or {},
                 surface_name=run.surface_name,
                 measurement_scope=run.measurement_scope,
                 report_eligible=run.report_eligible,
+                brief_version=run.brief_version,
+                scope_current=run.brief_version == project.brief_version,
             )
             for result, run in evidence_rows
         ],
@@ -808,6 +1019,11 @@ def get_project_dashboard(project_id: str, session: Session) -> ProjectDashboard
                 measurement_config=cycle.measurement_config or {},
                 baseline_summary=cycle.baseline_summary or {},
                 verification_summary=cycle.verification_summary or {},
+                retest_plan=(
+                    _retest_dto(latest_retest_by_cycle[cycle.id])
+                    if cycle.id in latest_retest_by_cycle
+                    else None
+                ),
                 started_at=cycle.started_at,
                 completed_at=cycle.completed_at,
             )
@@ -936,6 +1152,7 @@ def create_work_item_from_diagnosis(
             objective=f"改善「{insight.prompt_text}」在 {insight.engine_id} 答案面中的可见度与引用",
             stage="improve",
             measurement_config={
+                "brief_version": latest_run.brief_version,
                 "questions": [insight.prompt_text],
                 "engine_ids": [insight.engine_id],
                 "samples": latest_run.samples,
@@ -953,9 +1170,10 @@ def create_work_item_from_diagnosis(
                 "engines": [
                     {
                         "engine_id": insight.engine_id,
-                        "report_eligible": True,
-                        "measurement_scope": "citation",
+                        "report_eligible": latest_run.report_eligible,
+                        "measurement_scope": latest_run.measurement_scope,
                         "source_surface": latest_run.surface_name,
+                        "acquisition": latest_run.provider_acquisition,
                         "sample_size": insight.sample_size,
                         "entity_sov": insight.brand_mentions / insight.sample_size,
                         "citation_sov": insight.own_domain_citations / insight.sample_size,
@@ -980,6 +1198,7 @@ def create_work_item_from_diagnosis(
         priority=Severity(insight.priority),
         evidence_snapshot={
             "diagnosis_id": insight.id,
+            "brief_version": latest_run.brief_version,
             "diagnosis_kind": insight.kind,
             "engine_id": insight.engine_id,
             "prompt_text": insight.prompt_text,
@@ -1032,6 +1251,29 @@ def _delivery_dto(delivery: DeliveryRecord) -> DeliveryRecordDTO:
     )
 
 
+def _retest_dto(plan: CycleRetestPlan) -> CycleRetestPlanDTO:
+    return CycleRetestPlanDTO(
+        id=plan.id,
+        cycle_id=plan.cycle_id,
+        source_delivery_id=plan.source_delivery_id,
+        status=plan.status,
+        scheduled_for=plan.scheduled_for,
+        started_at=plan.started_at,
+        completed_at=plan.completed_at,
+        last_error=plan.last_error,
+        created_at=plan.created_at,
+        updated_at=plan.updated_at,
+    )
+
+
+def _latest_cycle_retest(cycle_id: str, session: Session) -> CycleRetestPlan | None:
+    return session.exec(
+        select(CycleRetestPlan)
+        .where(CycleRetestPlan.cycle_id == cycle_id)
+        .order_by(col(CycleRetestPlan.created_at).desc())
+    ).first()
+
+
 def get_work_item_detail(project_id: str, work_item_id: str, session: Session) -> WorkItemDetail:
     item = session.get(WorkItem, work_item_id)
     if item is None or item.project_id != project_id:
@@ -1046,10 +1288,12 @@ def get_work_item_detail(project_id: str, work_item_id: str, session: Session) -
         .where(DeliveryRecord.work_item_id == item.id)
         .order_by(col(DeliveryRecord.created_at).desc())
     ).all()
+    retest = _latest_cycle_retest(item.cycle_id, session)
     return WorkItemDetail(
         item=_work_item_dto(item),
         artifacts=[_artifact_dto(artifact) for artifact in artifacts],
         deliveries=[_delivery_dto(delivery) for delivery in deliveries],
+        retest_plan=_retest_dto(retest) if retest else None,
     )
 
 
@@ -1059,11 +1303,25 @@ def create_artifact_revision(
     req: ArtifactRevisionCreate,
     session: Session,
 ) -> OptimizationArtifactDTO:
+    project = session.get(Project, project_id)
     item = session.get(WorkItem, work_item_id)
-    if item is None or item.project_id != project_id:
+    if project is None or item is None or item.project_id != project_id:
         raise ValueError("优化工作不存在")
+    evidence_version = int((item.evidence_snapshot or {}).get("brief_version", 1))
+    if evidence_version != project.brief_version:
+        raise ValueError("该优化工作属于旧研究 Brief，请先建立当前基线")
     if req.kind not in {"content", "jsonld", "instructions"}:
         raise ValueError("不支持的产物类型")
+    source_artifact = None
+    if req.source_artifact_id:
+        source_artifact = session.get(OptimizationArtifact, req.source_artifact_id)
+        if (
+            source_artifact is None
+            or source_artifact.project_id != project_id
+            or source_artifact.work_item_id != item.id
+            or source_artifact.kind != req.kind
+        ):
+            raise ValueError("来源版本不存在或与当前优化工作不一致")
     previous = session.exec(
         select(OptimizationArtifact).where(
             OptimizationArtifact.work_item_id == item.id,
@@ -1074,6 +1332,14 @@ def create_artifact_revision(
         if artifact.status != "implemented":
             artifact.status = "superseded"
             session.add(artifact)
+    now = datetime.now(UTC)
+    source_snapshot = {
+        **(item.evidence_snapshot or {}),
+        **(source_artifact.source_snapshot if source_artifact else {}),
+        "brief_version": project.brief_version,
+        "revised_from_artifact_id": source_artifact.id if source_artifact else None,
+        "revised_at": now.isoformat(),
+    }
     artifact = OptimizationArtifact(
         project_id=project_id,
         cycle_id=item.cycle_id,
@@ -1083,17 +1349,43 @@ def create_artifact_revision(
         version=max((existing.version for existing in previous), default=0) + 1,
         content=req.content,
         structured_content=req.structured_content,
-        source_snapshot=item.evidence_snapshot,
+        source_snapshot=source_snapshot,
         created_by="user",
     )
     item.status = "in_progress"
     item.execution_mode = "self" if item.execution_mode == "unassigned" else item.execution_mode
-    item.updated_at = datetime.now(UTC)
+    item.updated_at = now
     session.add(item)
     session.add(artifact)
     session.commit()
     session.refresh(artifact)
     return _artifact_dto(artifact)
+
+
+def _validate_artifact_scope(
+    project_id: str,
+    artifact: OptimizationArtifact,
+    session: Session,
+) -> None:
+    project = session.get(Project, project_id)
+    if project is None:
+        raise ValueError("项目不存在")
+    source = artifact.source_snapshot or {}
+    evidence_version = int(source.get("brief_version", 1))
+    if evidence_version != project.brief_version:
+        raise ValueError("该优化产物属于旧研究 Brief，不能审批、导出或实施")
+    fact_ids = [fact_id for fact_id in source.get("brand_fact_ids", []) if isinstance(fact_id, str)]
+    invalid_fact_ids = [
+        fact_id
+        for fact_id in fact_ids
+        if (
+            (fact := session.get(BrandFact, fact_id)) is None
+            or fact.project_id != project_id
+            or fact.status != "verified"
+        )
+    ]
+    if invalid_fact_ids:
+        raise ValueError("该优化产物引用的品牌事实已停用或不可用，请重新生成或修订")
 
 
 def update_artifact_status(
@@ -1107,6 +1399,7 @@ def update_artifact_status(
         raise ValueError("优化产物不存在")
     if req.status != "approved":
         raise ValueError("不支持的产物状态")
+    _validate_artifact_scope(project_id, artifact, session)
     now = datetime.now(UTC)
     artifact.status = req.status
     artifact.updated_at = now
@@ -1173,6 +1466,7 @@ def create_delivery_record(
         raise ValueError("优化产物不存在")
     if artifact.status != "approved":
         raise ValueError("优化产物必须先审批")
+    _validate_artifact_scope(project_id, artifact, session)
     if req.method not in {"manual", "cms", "repository"} or req.status != "published":
         raise ValueError("不支持的实施记录")
     if not req.target_url.strip() and not req.notes.strip():
@@ -1191,6 +1485,23 @@ def create_delivery_record(
     )
     session.add(delivery)
     _mark_artifact_implemented(artifact, now, session)
+    cycle = session.get(GeoCycle, artifact.cycle_id)
+    if cycle is not None and cycle.stage == "verify":
+        existing_retest = session.exec(
+            select(CycleRetestPlan).where(
+                CycleRetestPlan.cycle_id == cycle.id,
+                col(CycleRetestPlan.status).in_({"scheduled", "running"}),
+            )
+        ).first()
+        if existing_retest is None:
+            session.add(
+                CycleRetestPlan(
+                    project_id=project_id,
+                    cycle_id=cycle.id,
+                    source_delivery_id=delivery.id,
+                    scheduled_for=now + timedelta(days=req.retest_after_days),
+                )
+            )
     session.commit()
     session.refresh(delivery)
     return _delivery_dto(delivery)
@@ -1206,6 +1517,7 @@ def export_artifact(
         raise ValueError("优化产物不存在")
     if artifact.status not in {"approved", "implemented"}:
         raise ValueError("优化产物必须先审批")
+    _validate_artifact_scope(project_id, artifact, session)
     is_json = artifact.kind == "jsonld"
     content = (
         json.dumps(artifact.structured_content, ensure_ascii=False, indent=2)
@@ -1255,6 +1567,56 @@ def _change_assessment(baseline: dict, verification: dict, prefix: str) -> str:
     return "uncertain"
 
 
+def _normalized_baseline_scope(baseline: dict, session: Session) -> dict:
+    normalized = dict(baseline)
+    normalized.setdefault("surface_name", normalized.get("source_surface", ""))
+    normalized.setdefault("acquisition", normalized.get("provider_acquisition", ""))
+    run_ids = normalized.get("source_run_ids", [])
+    source_run = (
+        session.get(CitationRun, run_ids[0])
+        if isinstance(run_ids, list) and run_ids and isinstance(run_ids[0], str)
+        else None
+    )
+    if source_run is not None:
+        normalized["surface_name"] = normalized.get("surface_name") or source_run.surface_name
+        normalized["acquisition"] = (
+            normalized.get("acquisition") or source_run.provider_acquisition
+        )
+        normalized["measurement_scope"] = (
+            normalized.get("measurement_scope") or source_run.measurement_scope
+        )
+        normalized["report_eligible"] = normalized.get(
+            "report_eligible", source_run.report_eligible
+        )
+    return normalized
+
+
+def _comparison_scope_reasons(baseline: dict, verification: dict) -> list[str]:
+    reasons: list[str] = []
+    fields = (
+        ("surface_name", "答案面"),
+        ("acquisition", "采集方式"),
+        ("measurement_scope", "测量范围"),
+    )
+    for field, label in fields:
+        baseline_value = str(baseline.get(field, "")).strip()
+        verification_value = str(verification.get(field, "")).strip()
+        if not baseline_value:
+            reasons.append(f"基线缺少{label}记录")
+        elif baseline_value != verification_value:
+            reasons.append(f"{label}已从「{baseline_value}」变为「{verification_value or '未知'}」")
+    if not baseline.get("report_eligible", False):
+        reasons.append("基线不是正式报告样本")
+    if not verification.get("report_eligible", False):
+        reasons.append("复测不是正式报告样本")
+    if int(baseline.get("sample_size", 0)) != int(verification.get("sample_size", 0)):
+        reasons.append(
+            f"正式样本数已从 {int(baseline.get('sample_size', 0))} 变为 "
+            f"{int(verification.get('sample_size', 0))}"
+        )
+    return reasons
+
+
 async def verify_geo_cycle(
     project_id: str,
     cycle_id: str,
@@ -1263,48 +1625,115 @@ async def verify_geo_cycle(
     cycle = session.get(GeoCycle, cycle_id)
     if cycle is None or cycle.project_id != project_id:
         raise ValueError("优化周期不存在")
+    if cycle.status == "complete":
+        return CycleVerificationResponse(
+            cycle_id=cycle.id,
+            status=cycle.status,
+            verification_summary=cycle.verification_summary or {},
+        )
+    if cycle.stage != "verify":
+        raise ValueError("必须先完成本周期的审批产物和实施记录，才能复测")
     config = cycle.measurement_config or {}
     if not config.get("questions") or not config.get("engine_ids"):
         raise ValueError("该周期没有可复用的基线测量配置")
 
+    retest = _latest_cycle_retest(cycle.id, session)
+    project = session.get(Project, project_id)
+    cycle_brief_version = int(config.get("brief_version", 1))
+    if project is None:
+        raise ValueError("项目不存在")
+    if cycle_brief_version != project.brief_version:
+        if retest is not None:
+            retest.status = "cancelled"
+            retest.last_error = "研究 Brief 已更新；旧周期不能继续归因，请建立新基线"
+            retest.updated_at = datetime.now(UTC)
+            session.add(retest)
+            session.commit()
+        raise ValueError("研究 Brief 已更新；旧周期不能继续归因，请建立新基线")
+    now = datetime.now(UTC)
+    if retest is not None:
+        retest.status = "running"
+        retest.started_at = now
+        retest.last_error = ""
+        retest.updated_at = now
+        session.add(retest)
     cycle.stage = "verify"
     cycle.status = "active"
     session.add(cycle)
     session.commit()
 
-    response = await run_citations(
-        CitationRunRequest(
-            project_id=project_id,
-            cycle_id=cycle.id,
-            engine_ids=config["engine_ids"],
-            prompts=config["questions"],
-            brand_name=config.get("brand_name", ""),
-            aliases=config.get("aliases", []),
-            brand_domains=config.get("brand_domains", []),
-            competitors=config.get("competitors", []),
-            samples=config.get("samples", 3),
-        ),
-        session,
-    )
+    try:
+        response = await run_citations(
+            CitationRunRequest(
+                project_id=project_id,
+                cycle_id=cycle.id,
+                engine_ids=config["engine_ids"],
+                prompts=config["questions"],
+                brand_name=config.get("brand_name", ""),
+                aliases=config.get("aliases", []),
+                brand_domains=config.get("brand_domains", []),
+                competitors=config.get("competitors", []),
+                samples=config.get("samples", 3),
+            ),
+            session,
+        )
+        eligible_results = [result for result in response.results if result.report_eligible]
+        expected_engines = set(config["engine_ids"])
+        returned_engines = {result.engine_id for result in eligible_results}
+        if returned_engines != expected_engines:
+            missing = "、".join(sorted(expected_engines - returned_engines))
+            details = "；".join(response.errors.values()) or (
+                f"答案面 {missing or '未知'} 没有返回正式样本"
+            )
+            raise ValueError(f"复测没有获得可比较结果：{details}")
+    except Exception as error:
+        if retest is not None:
+            failed_at = datetime.now(UTC)
+            retest.status = "failed"
+            retest.last_error = str(error)
+            retest.updated_at = failed_at
+            session.add(retest)
+            session.commit()
+        raise
 
     baseline_by_engine = {
         result["engine_id"]: result for result in cycle.baseline_summary.get("engines", [])
     }
     comparisons = []
-    for result in response.results:
+    for result in eligible_results:
         current = result.model_dump()
-        baseline = baseline_by_engine.get(result.engine_id, {})
+        baseline = _normalized_baseline_scope(
+            baseline_by_engine.get(result.engine_id, {}), session
+        )
+        scope_reasons = _comparison_scope_reasons(baseline, current)
+        comparable = not scope_reasons
         comparisons.append(
             {
                 "engine_id": result.engine_id,
                 "baseline": baseline,
                 "verification": current,
-                "entity_delta": round(result.entity_sov - float(baseline.get("entity_sov", 0)), 3),
-                "citation_delta": round(
-                    result.citation_sov - float(baseline.get("citation_sov", 0)), 3
+                "comparison_status": "comparable" if comparable else "scope_changed",
+                "comparison_reasons": scope_reasons,
+                "entity_delta": (
+                    round(result.entity_sov - float(baseline.get("entity_sov", 0)), 3)
+                    if comparable
+                    else None
                 ),
-                "entity_assessment": _change_assessment(baseline, current, "entity"),
-                "citation_assessment": _change_assessment(baseline, current, "citation"),
+                "citation_delta": (
+                    round(result.citation_sov - float(baseline.get("citation_sov", 0)), 3)
+                    if comparable
+                    else None
+                ),
+                "entity_assessment": (
+                    _change_assessment(baseline, current, "entity")
+                    if comparable
+                    else "not_comparable"
+                ),
+                "citation_assessment": (
+                    _change_assessment(baseline, current, "citation")
+                    if comparable
+                    else "not_comparable"
+                ),
             }
         )
 
@@ -1320,8 +1749,18 @@ async def verify_geo_cycle(
         item.id: item
         for item in session.exec(select(WorkItem).where(WorkItem.cycle_id == cycle.id)).all()
     }
+    cycle_comparable = bool(comparisons) and all(
+        item["comparison_status"] == "comparable" for item in comparisons
+    )
     cycle.verification_summary = {
         "captured_at": datetime.now(UTC).isoformat(),
+        "brief_version": cycle_brief_version,
+        "comparison_status": "comparable" if cycle_comparable else "scope_changed",
+        "comparison_note": (
+            "复测与基线使用同一研究范围，可以评估变化。"
+            if cycle_comparable
+            else "复测范围与基线不一致，本次结果不能归因于已实施改动；请建立新基线。"
+        ),
         "questions": config["questions"],
         "engines": comparisons,
         "changes": [
@@ -1346,10 +1785,46 @@ async def verify_geo_cycle(
     cycle.stage = "complete"
     cycle.status = "complete"
     cycle.completed_at = datetime.now(UTC)
+    if retest is not None:
+        retest.status = "complete"
+        retest.completed_at = cycle.completed_at
+        retest.updated_at = cycle.completed_at
+        session.add(retest)
     session.add(cycle)
     session.commit()
     return CycleVerificationResponse(
         cycle_id=cycle.id,
         status=cycle.status,
         verification_summary=cycle.verification_summary,
+    )
+
+
+async def run_due_cycle_retests(session: Session) -> DueRetestResponse:
+    now = datetime.now(UTC)
+    plans = session.exec(
+        select(CycleRetestPlan)
+        .where(
+            CycleRetestPlan.status == "scheduled",
+            CycleRetestPlan.scheduled_for <= now,
+        )
+        .order_by(col(CycleRetestPlan.scheduled_for))
+    ).all()
+    completed = 0
+    failed = 0
+    plan_ids: list[str] = []
+    errors: dict[str, str] = {}
+    for plan in plans:
+        plan_ids.append(plan.id)
+        try:
+            await verify_geo_cycle(plan.project_id, plan.cycle_id, session)
+            completed += 1
+        except Exception as error:
+            failed += 1
+            errors[plan.id] = str(error)
+    return DueRetestResponse(
+        processed=len(plans),
+        completed=completed,
+        failed=failed,
+        plan_ids=plan_ids,
+        errors=errors,
     )

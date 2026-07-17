@@ -13,7 +13,10 @@ from keeplix.models import (
     BrandEntity,
     CitationResult,
     CitationRun,
+    Project,
     ProjectActivity,
+    Prompt,
+    PromptSet,
     VisibilityScore,
 )
 from keeplix.models.enums import RunStatus, Sentiment
@@ -21,6 +24,7 @@ from keeplix.providers import get_provider
 from keeplix.schemas import CitationRunRequest, CitationRunResponse, SoVEngineResult
 from keeplix.services.engine_runtime_service import mark_engine_failure, mark_engine_success
 from keeplix.services.qualification_service import get_qualification, is_formally_eligible
+from keeplix.services.research_scope_service import research_brief_missing_fields
 
 
 def _provider_error(error: Exception) -> str:
@@ -53,11 +57,63 @@ async def run_citations(req: CitationRunRequest, session: Session) -> CitationRu
     competitors = list(
         dict.fromkeys(item.strip() for item in (req.competitors or []) if item.strip())
     )
+    formal_scope_ready = False
+    brief_missing_fields: list[str] = []
+    brief_version = 1
 
     if req.project_id:
+        project = session.get(Project, req.project_id)
+        if project is None:
+            raise ValueError("项目不存在")
+        brief_version = project.brief_version
         brand = session.exec(
             select(BrandEntity).where(BrandEntity.project_id == req.project_id)
         ).first()
+        brief_missing_fields = research_brief_missing_fields(project, brand)
+        if brand is not None and not brief_missing_fields:
+            expected_domains = brand.domains or (
+                [project.primary_domain] if project.primary_domain else []
+            )
+            scope_mismatch = (
+                req.brand_name.strip() != brand.brand_name.strip()
+                or (
+                    req.brand_domains is not None
+                    and set(req.brand_domains) != set(expected_domains)
+                )
+                or (
+                    req.competitors is not None
+                    and competitors != brand.competitors
+                )
+            )
+            if scope_mismatch:
+                raise ValueError(
+                    "本次品牌、域名或竞品与项目 Brief 不一致；"
+                    "请先在项目中更新研究范围"
+                )
+        if req.prompt_set_id:
+            prompt_set = session.get(PromptSet, req.prompt_set_id)
+            if prompt_set is None or prompt_set.project_id != req.project_id:
+                raise ValueError("问题集不存在或不属于当前项目")
+            if not prompt_set.active and not req.tracking_plan_id:
+                raise ValueError("该问题集已被新版本替代")
+            if prompt_set.brief_version != project.brief_version:
+                raise ValueError("该问题集属于旧研究 Brief")
+            stored_prompts = {
+                item.text.strip()
+                for item in session.exec(
+                    select(Prompt).where(
+                        Prompt.prompt_set_id == prompt_set.id,
+                        Prompt.active,
+                    )
+                ).all()
+            }
+            requested_prompts = {item.strip() for item in req.prompts if item.strip()}
+            if stored_prompts != requested_prompts:
+                raise ValueError("本次问题与已保存的问题集不一致")
+        # Direct API runs still freeze their complete input on ProjectActivity. The
+        # product UI always creates a versioned PromptSet first, while legacy/API
+        # clients remain eligible when the underlying Brief itself is complete.
+        formal_scope_ready = not brief_missing_fields
         if brand is None:
             brand = BrandEntity(
                 project_id=req.project_id,
@@ -67,8 +123,16 @@ async def run_citations(req: CitationRunRequest, session: Session) -> CitationRu
                 competitors=competitors,
             )
             session.add(brand)
-        elif req.competitors is not None:
-            brand.competitors = competitors
+        elif brief_missing_fields:
+            # Legacy/incomplete projects may retain development evidence, but
+            # these changes never qualify as a formal baseline.
+            brand.brand_name = req.brand_name
+            if req.aliases is not None:
+                brand.aliases = req.aliases
+            if req.brand_domains is not None:
+                brand.domains = req.brand_domains
+            if req.competitors is not None:
+                brand.competitors = competitors
             session.add(brand)
         activity = ProjectActivity(
             project_id=req.project_id,
@@ -86,6 +150,9 @@ async def run_citations(req: CitationRunRequest, session: Session) -> CitationRu
                 "tracking_plan_id": req.tracking_plan_id,
                 "measurement_quality": measurement_quality,
                 "competitors": competitors,
+                "brief_version": project.brief_version,
+                "formal_scope_ready": formal_scope_ready,
+                "brief_missing_fields": brief_missing_fields,
             },
         )
         session.add(activity)
@@ -101,7 +168,12 @@ async def run_citations(req: CitationRunRequest, session: Session) -> CitationRu
         acquisition = str(getattr(provider, "acquisition", "stub"))
         measurement_scope = str(getattr(provider, "measurement_scope", "stub"))
         qualification = get_qualification(engine_id, session)
-        report_eligible = is_formally_eligible(qualification, acquisition, measurement_scope)
+        provider_eligible = is_formally_eligible(
+            qualification, acquisition, measurement_scope
+        )
+        report_eligible = provider_eligible and (
+            not req.project_id or formal_scope_ready
+        )
         run: CitationRun | None = None
         if req.project_id:
             run = CitationRun(
@@ -109,6 +181,7 @@ async def run_citations(req: CitationRunRequest, session: Session) -> CitationRu
                 activity_id=activity.id if activity else None,
                 prompt_set_id=req.prompt_set_id,
                 tracking_plan_id=req.tracking_plan_id,
+                brief_version=brief_version,
                 engine_id=engine_id,
                 surface_name=qualification.surface_name,
                 provider_acquisition=acquisition,
@@ -186,7 +259,10 @@ async def run_citations(req: CitationRunRequest, session: Session) -> CitationRu
                         project_id=req.project_id,
                         engine_id=engine_id,
                         surface_name=qualification.surface_name,
+                        provider_acquisition=acquisition,
+                        measurement_scope=measurement_scope,
                         tracking_plan_id=req.tracking_plan_id,
+                        brief_version=brief_version,
                         report_eligible=True,
                         measurement_quality=measurement_quality,
                         competitor_sov=report.competitor_sov,

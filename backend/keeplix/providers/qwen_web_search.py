@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 from typing import Literal
+from urllib.parse import urlparse
 
 import httpx
 
@@ -16,6 +17,19 @@ from keeplix.providers.base import CitedSource, EngineResponse
 
 _ENDPOINT = "https://dashscope.aliyuncs.com/api/v2/apps/web-search-agent/chat/completions"
 _URL_RE = re.compile(r"https?://[^\s\]>)，。；]+")
+_NON_CONTENT_SUFFIXES = {
+    ".avif",
+    ".bmp",
+    ".gif",
+    ".ico",
+    ".jpeg",
+    ".jpg",
+    ".png",
+    ".svg",
+    ".webp",
+}
+_IMAGE_FORMATS = {"avif", "bmp", "gif", "jpeg", "jpg", "png", "svg", "webp"}
+_FORMAT_RE = re.compile(r"(?:[?&])(?:f|format)=([^&?]+)", re.IGNORECASE)
 
 
 class QwenWebSearchProvider:
@@ -110,7 +124,7 @@ def _extract_sources(events: list[dict], answer: str) -> list[CitedSource]:
     def visit(value: object) -> None:
         if isinstance(value, dict):
             url = value.get("url") or value.get("link") or value.get("source_url")
-            if isinstance(url, str) and url.startswith(("http://", "https://")):
+            if isinstance(url, str) and _is_content_url(url):
                 found.setdefault(
                     url,
                     CitedSource(
@@ -125,8 +139,21 @@ def _extract_sources(events: list[dict], answer: str) -> list[CitedSource]:
                 visit(child)
         elif isinstance(value, str):
             for url in _URL_RE.findall(value):
-                found.setdefault(url, CitedSource(url=url))
+                if _is_content_url(url):
+                    found.setdefault(url, CitedSource(url=url))
 
     visit(events)
     visit(answer)
     return list(found.values())
+
+
+def _is_content_url(value: str) -> bool:
+    parsed = urlparse(value)
+    hostname = parsed.hostname or ""
+    if parsed.scheme not in {"http", "https"} or "." not in hostname:
+        return False
+    if any(parsed.path.lower().endswith(suffix) for suffix in _NON_CONTENT_SUFFIXES):
+        return False
+    format_match = _FORMAT_RE.search(value)
+    requested_format = format_match.group(1).lower() if format_match else ""
+    return requested_format not in _IMAGE_FORMATS
