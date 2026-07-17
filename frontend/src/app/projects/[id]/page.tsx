@@ -64,6 +64,30 @@ function formatTime(value: string) {
 function formatDate(value: string) {
   return new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "long", day: "numeric" }).format(new Date(value));
 }
+function averageRate(snapshots: VisibilitySnapshot[], key: "entity_sov" | "citation_sov") {
+  if (!snapshots.length) return 0;
+  return snapshots.reduce((sum, item) => sum + item[key], 0) / snapshots.length;
+}
+function competitiveRanking(brandName: string, snapshots: VisibilitySnapshot[]) {
+  const totals = new Map<string, { sum: number; count: number; isBrand: boolean }>();
+  totals.set(brandName, { sum: averageRate(snapshots, "entity_sov") * Math.max(snapshots.length, 1), count: Math.max(snapshots.length, 1), isBrand: true });
+  for (const snapshot of snapshots) {
+    for (const [name, value] of Object.entries(snapshot.competitor_sov)) {
+      const current = totals.get(name) ?? { sum: 0, count: 0, isBrand: false };
+      totals.set(name, { sum: current.sum + value, count: current.count + 1, isBrand: false });
+    }
+  }
+  return Array.from(totals.entries())
+    .map(([name, value]) => ({ name, rate: value.count ? value.sum / value.count : 0, isBrand: value.isBrand }))
+    .sort((a, b) => b.rate - a.rate);
+}
+function statusHeadline(brandName: string, entityRate: number, hasData: boolean) {
+  if (!hasData) return { title: "还不知道品牌在 AI 答案里的位置", detail: "补齐研究范围后，一键测量即可看到提及率、竞品排名和引用来源。" };
+  if (entityRate <= 0) return { title: `${brandName} 几乎未出现在当前 AI 答案中`, detail: "在已测问题里品牌提及很低；优先看品类与需求类问题的竞品被推荐原因。" };
+  if (entityRate < 0.2) return { title: `${brandName} 偶有出现，但市场声量偏弱`, detail: "已进入部分答案，但份额不高；对照竞品与来源结构找差距。" };
+  if (entityRate < 0.45) return { title: `${brandName} 已有可见度，仍有提升空间`, detail: "品牌会被提到，但尚未稳定成为首选推荐。关注缺席的问题类型。" };
+  return { title: `${brandName} 在当前样本中表现较强`, detail: "保持同一问题集与答案面复测，观察份额是否可复现、可维持。" };
+}
 
 export default function ProjectDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const router = useRouter();
@@ -100,6 +124,8 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
   const [factDraft, setFactDraft] = useState<{ factType: BrandFactType; claim: string; sourceUrl: string }>({ factType: "product", claim: "", sourceUrl: "" });
   const [factBusy, setFactBusy] = useState(false);
   const [factError, setFactError] = useState<string | null>(null);
+  const [baselineBusy, setBaselineBusy] = useState(false);
+  const [baselineError, setBaselineError] = useState<string | null>(null);
 
   useEffect(() => {
     void params.then(({ id }) => api.project(id).then(setDashboard).catch((reason: unknown) => {
@@ -163,6 +189,16 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
   const hasInsights = dashboard.diagnosis.qualified_sample_count > 0;
   const hasTracking = dashboard.tracking_plans.some((plan) => plan.scope_current && plan.status === "active");
   const briefComplete = dashboard.brief_ready;
+  const avgEntitySov = averageRate(latestByEngine, "entity_sov");
+  const avgCitationSov = averageRate(latestByEngine, "citation_sov");
+  const ranking = competitiveRanking(dashboard.brand_name, latestByEngine);
+  const brandRank = ranking.findIndex((item) => item.isBrand) + 1;
+  const statusCopy = statusHeadline(dashboard.brand_name, avgEntitySov, hasVisibility);
+  const comparableDeltas = latestByEngine.filter((item) => item.comparison_status === "comparable" && item.entity_delta !== null);
+  const avgEntityDelta = comparableDeltas.length
+    ? comparableDeltas.reduce((sum, item) => sum + (item.entity_delta ?? 0), 0) / comparableDeltas.length
+    : null;
+  const topInsights = dashboard.diagnosis.insights.slice(0, 3);
   const journeySteps = [
     { label: "研究范围", detail: briefComplete ? `${dashboard.market} · ${dashboard.category}` : "补齐品类、目标与竞品", complete: briefComplete },
     { label: "AI 市场基线", detail: "测量品牌、竞品与引用来源", complete: briefComplete && hasVisibility },
@@ -170,15 +206,16 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
     { label: "持续追踪", detail: "固定口径并观察市场变化", complete: briefComplete && hasTracking },
   ];
   const currentJourneyIndex = journeySteps.findIndex((step) => !step.complete);
+  const canMeasureNow = briefComplete || hasTracking;
   const nextAction = !briefComplete
-    ? { eyebrow: "第 1 步 · 研究范围", title: "先明确我们正在研究哪个市场问题", detail: "品类、竞品和研究目标会直接决定问题集；范围含糊时，AI 答案也会偏离真实产品。", href: "#research-brief", label: "完善研究范围" }
+    ? { eyebrow: "第 1 步 · 研究范围", title: "先明确我们正在研究哪个市场问题", detail: "品类、竞品和研究目标会直接决定问题集；范围含糊时，AI 答案也会偏离真实产品。", href: "#research-brief", label: "完善研究范围", action: "brief" as const }
     : !hasVisibility
-    ? { eyebrow: "第 2 步 · AI 市场基线", title: `测量 ${dashboard.brand_name} 在真实 AI 答案中的市场位置`, detail: `围绕 ${dashboard.category || "目标品类"} 的消费者与采购问题，对比 ${dashboard.competitors.length ? dashboard.competitors.join("、") : "主要竞品"} 的品牌提及、推荐与来源。`, href: trackHref, label: "设计问题并建立基线" }
+    ? { eyebrow: "第 2 步 · 立刻看清现状", title: `一键测量 ${dashboard.brand_name} 在 AI 答案中的位置`, detail: `用默认企业问题框架，在已验收答案面上采样，得到品牌提及、竞品排名与引用来源。`, href: trackHref, label: baselineBusy ? "正在测量…" : "一键测量市场位置", action: "measure" as const }
     : !hasInsights
-      ? { eyebrow: "第 3 步 · 竞争洞察", title: "从答案证据解释市场差距", detail: "按问题意图、答案面和来源查看品牌为何出现、竞品为何被推荐，以及当前样本范围的限制。", href: viewHref("visibility"), label: "审阅答案证据" }
+      ? { eyebrow: "第 3 步 · 竞争洞察", title: "从答案证据解释市场差距", detail: "按问题意图、答案面和来源查看品牌为何出现、竞品为何被推荐，以及当前样本范围的限制。", href: viewHref("visibility"), label: "审阅答案证据", action: "link" as const }
       : !hasTracking
-        ? { eyebrow: "第 4 步 · 持续追踪", title: "固定研究口径，开始观察变化", detail: "保存问题集、答案面、采样次数和频率，让后续结果可以与本次基线直接比较。", href: viewHref("tracking"), label: "建立持续追踪" }
-        : { eyebrow: "研究运行中", title: "查看最新市场变化与证据", detail: "聚焦品牌份额、竞品变化、来源结构和异常结果，形成下一次客户汇报的依据。", href: viewHref("visibility"), label: "查看最新洞察" };
+        ? { eyebrow: "第 4 步 · 持续追踪", title: "固定研究口径，开始观察变化", detail: "保存问题集、答案面、采样次数和频率，让后续结果可以与本次基线直接比较。", href: viewHref("tracking"), label: "建立持续追踪", action: "link" as const }
+        : { eyebrow: "更新现状", title: "用同一口径重新测量市场位置", detail: "复用当前追踪计划，刷新品牌份额、竞品排名与证据，形成可比较的变化。", href: viewHref("visibility"), label: baselineBusy ? "正在更新…" : "重新测量", action: "measure" as const };
 
   async function updateWork(itemId: string, status: "open" | "in_progress" | "review" | "done" | "dismissed") {
     const updated = await api.updateWorkItem(dashboard!.id, itemId, { status });
@@ -236,6 +273,52 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
   }
 
   async function refreshProject() { setDashboard(await api.project(dashboardId)); }
+
+  async function measureCompanyStatus() {
+    setBaselineBusy(true);
+    setBaselineError(null);
+    try {
+      const existingPlan = dashboard?.tracking_plans.find((plan) => plan.scope_current && plan.status === "active");
+      if (existingPlan) {
+        await api.runTrackingPlan(dashboardId, existingPlan.id);
+        await refreshProject();
+        return;
+      }
+      if (!dashboard?.brief_ready) {
+        throw new Error("请先补齐研究 Brief（品牌、市场、品类、竞品、研究目标），再测量市场位置。");
+      }
+      const engines = availableEngines.length
+        ? availableEngines
+        : (await api.engines()).filter((engine) => engine.report_eligible);
+      if (!engines.length) {
+        throw new Error("当前没有已验收的正式答案面。请先配置并验收 Provider（如千问联网、百度智能搜索）。");
+      }
+      let promptSetId = dashboard.prompt_sets.find((item) => item.active && item.scope_current)?.id;
+      if (!promptSetId) {
+        const framework = await api.questionFramework(dashboardId);
+        const prompts = framework.items.filter((item) => item.selected).map((item) => item.text.trim()).filter(Boolean);
+        if (!prompts.length) throw new Error("问题框架为空。请完善品类与竞品后再试。");
+        const promptSet = await api.createPromptSet(dashboardId, {
+          name: `企业研究基线 ${new Date().toLocaleDateString("zh-CN")}`,
+          prompts,
+          kind: "tracking",
+        });
+        promptSetId = promptSet.id;
+      }
+      const plan = await api.createTrackingPlan(dashboardId, {
+        prompt_set_id: promptSetId,
+        engine_ids: engines.map((engine) => engine.id),
+        samples: 3,
+        cadence: "weekly",
+      });
+      await api.runTrackingPlan(dashboardId, plan.id);
+      await refreshProject();
+    } catch (reason) {
+      setBaselineError(reason instanceof Error ? reason.message : "市场测量未能完成。");
+    } finally {
+      setBaselineBusy(false);
+    }
+  }
 
   async function addBrandFact() {
     if (!factDraft.claim.trim() || !factDraft.sourceUrl.trim()) {
@@ -368,7 +451,17 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
 
     <header className="project-header">
       <div><div className="project-status"><i />{dashboard.status === "active" ? "研究进行中" : dashboard.status}</div><h1>{dashboard.name}</h1><p>{dashboard.client_name} · {dashboard.market} · {dashboard.category || "未设置品类"} · 核心品牌 {dashboard.brand_name}{lastUpdated ? ` · 更新于 ${formatTime(lastUpdated)}` : ""}</p></div>
-      <div className="project-header-actions"><Link className="project-primary-action" href={nextAction.href}>{nextAction.label} <span>→</span></Link></div>
+      <div className="project-header-actions">
+        {nextAction.action === "measure" ? (
+          <button className="project-primary-action" type="button" onClick={() => void measureCompanyStatus()} disabled={baselineBusy || !canMeasureNow}>
+            {nextAction.label} <span>→</span>
+          </button>
+        ) : nextAction.action === "brief" ? (
+          <a className="project-primary-action" href={nextAction.href}>{nextAction.label} <span>→</span></a>
+        ) : (
+          <Link className="project-primary-action" href={nextAction.href}>{nextAction.label} <span>→</span></Link>
+        )}
+      </div>
     </header>
 
     <nav className="project-nav" aria-label="项目导航">{PROJECT_VIEWS.map((view) => <Link key={view.id} className={activeView === view.id ? "is-active" : ""} aria-current={activeView === view.id ? "page" : undefined} href={viewHref(view.id)}>{view.label}</Link>)}</nav>
@@ -376,10 +469,103 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
     <main className="project-main">
       <div className={`project-view project-view-${activeView}`}>
       {activeView === "overview" && <>
-      {isWelcome && <section className="project-welcome"><span>研究项目已创建</span><div><strong>先确认研究问题和竞争范围，再开始真实答案采样。</strong><p>可见力会按同一口径保存证据、洞察与后续变化。</p></div></section>}
+      {isWelcome && <section className="project-welcome"><span>研究项目已创建</span><div><strong>先看清品牌在 AI 答案里的位置，再决定改什么。</strong><p>补齐研究范围后一键测量；结果会按同一口径保存，方便复测与汇报。</p></div></section>}
+
+      <section className="project-overview-grid company-status-grid">
+        <article className="project-state-card">
+          <div className="card-eyebrow"><span>公司 AI 市场现状</span><span>{hasVisibility ? "基于最新正式样本" : "尚未测量"}</span></div>
+          <div className="state-score">
+            <strong>{hasVisibility ? percent(avgEntitySov) : "—"}</strong>
+            <div>
+              <h2>{statusCopy.title}</h2>
+              <p>{hasVisibility
+                ? `${statusCopy.detail} 已覆盖 ${latestByEngine.length} 个答案面；最近一次 ${latestVisibility?.output_summary.sample_count ?? 0} 个样本。`
+                : statusCopy.detail}</p>
+            </div>
+          </div>
+          <div className="state-metrics">
+            <div><span>品牌提及率</span><b>{hasVisibility ? percent(avgEntitySov) : "—"}</b></div>
+            <div><span>自有域名引用</span><b>{hasVisibility ? percent(avgCitationSov) : "—"}</b></div>
+            <div><span>竞品排名</span><b>{hasVisibility && brandRank > 0 ? `第 ${brandRank} / ${ranking.length}` : "—"}</b></div>
+            <div><span>相对上次</span><b>{avgEntityDelta === null ? "—" : signedPercent(avgEntityDelta)}</b></div>
+          </div>
+          {hasVisibility && ranking.length > 0 && (
+            <div className="company-ranking" aria-label="品牌与竞品提及排名">
+              <header><span>AI 答案提及排名</span><small>按当前答案面平均提及率</small></header>
+              {ranking.slice(0, 6).map((item, index) => (
+                <div className={`company-ranking-row${item.isBrand ? " is-brand" : ""}`} key={item.name}>
+                  <b>{String(index + 1).padStart(2, "0")}</b>
+                  <strong>{item.name}{item.isBrand ? " · 本品牌" : ""}</strong>
+                  <div className="company-ranking-bar"><i style={{ width: `${Math.max(item.rate * 100, item.rate ? 4 : 0)}%` }} /></div>
+                  <span>{percent(item.rate)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {!hasVisibility && (
+            <div className="company-status-empty">
+              <p>{briefComplete
+                ? "研究范围已就绪。点击一键测量，系统会用企业问题框架在已验收答案面上采样。"
+                : "还缺研究范围。先补齐品类、竞品和研究目标，否则测到的答案可能偏题。"}</p>
+              {briefComplete ? (
+                <button type="button" className="agent-primary-button" onClick={() => void measureCompanyStatus()} disabled={baselineBusy || !canMeasureNow}>
+                  {baselineBusy ? "正在测量市场位置…" : "一键测量市场位置"}
+                </button>
+              ) : (
+                <a className="agent-primary-button" href="#research-brief">去完善研究范围</a>
+              )}
+              <Link href={trackHref}>或手动设计问题与答案面 →</Link>
+            </div>
+          )}
+          {baselineError && <p className="cycle-action-error" role="alert">{baselineError}</p>}
+        </article>
+
+        <aside className="next-action-card">
+          <span>{nextAction.eyebrow}</span>
+          <h2>{nextAction.title}</h2>
+          <p>{nextAction.detail}</p>
+          {nextAction.action === "measure" ? (
+            <button type="button" onClick={() => void measureCompanyStatus()} disabled={baselineBusy || !canMeasureNow}>
+              {nextAction.label}<span>→</span>
+            </button>
+          ) : nextAction.action === "brief" ? (
+            <a href={nextAction.href}>{nextAction.label}<span>→</span></a>
+          ) : (
+            <Link href={nextAction.href}>{nextAction.label}<span>→</span></Link>
+          )}
+          {hasVisibility && (
+            <div className="next-action-links">
+              <Link href={viewHref("visibility")}>看答案证据</Link>
+              <Link href={viewHref("report")}>打开研究报告</Link>
+            </div>
+          )}
+        </aside>
+      </section>
+
+      {topInsights.length > 0 && (
+        <section className="company-insight-strip">
+          <div className="project-section-head">
+            <div><span>现在该关注什么</span><h2>来自最新正式证据的优先信号</h2></div>
+            <Link href={viewHref("visibility")}>全部诊断 →</Link>
+          </div>
+          <div className="company-insight-list">
+            {topInsights.map((insight) => (
+              <article key={insight.id}>
+                <span>{insight.priority === "high" ? "优先" : "关注"} · {INTENT_LABEL[insight.prompt_intent] ?? insight.prompt_intent}</span>
+                <strong>{insight.title}</strong>
+                <p>{insight.detail}</p>
+              </article>
+            ))}
+          </div>
+        </section>
+      )}
+
+      <ol className="project-journey" aria-label="项目进度">
+        {journeySteps.map((step, index) => <li key={step.label} className={step.complete ? "is-complete" : index === currentJourneyIndex ? "is-current" : "is-upcoming"}><span>{step.complete ? "✓" : String(index + 1).padStart(2, "0")}</span><div><strong>{step.label}</strong><p>{step.detail}</p></div></li>)}
+      </ol>
 
       <section id="research-brief" className={`project-research-brief${briefComplete ? " is-complete" : " is-incomplete"}`}>
-        <div className="project-section-head"><div><span>研究 Brief</span><h2>先固定研究对象与商业问题</h2></div>{!briefEditing && <button type="button" onClick={beginBriefEdit}>{briefComplete ? "编辑研究范围" : "完善研究范围"}</button>}</div>
+        <div className="project-section-head"><div><span>研究 Brief</span><h2>{briefComplete ? "当前研究范围" : "先固定研究对象与商业问题"}</h2></div>{!briefEditing && <button type="button" onClick={beginBriefEdit}>{briefComplete ? "编辑研究范围" : "完善研究范围"}</button>}</div>
         {briefEditing ? <div className="research-brief-form">
           <label><span>核心品牌</span><input value={briefDraft.brandName} onChange={(event) => setBriefDraft((current) => ({ ...current, brandName: event.target.value }))} /></label>
           <label><span>品牌域名</span><input value={briefDraft.domain} onChange={(event) => setBriefDraft((current) => ({ ...current, domain: event.target.value }))} /></label>
@@ -397,23 +583,9 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
         </div>}
       </section>
 
-      <ol className="project-journey" aria-label="项目进度">
-        {journeySteps.map((step, index) => <li key={step.label} className={step.complete ? "is-complete" : index === currentJourneyIndex ? "is-current" : "is-upcoming"}><span>{step.complete ? "✓" : String(index + 1).padStart(2, "0")}</span><div><strong>{step.label}</strong><p>{step.detail}</p></div></li>)}
-      </ol>
-
-      <section className="project-overview-grid">
-        <article className="project-state-card">
-          <div className="card-eyebrow"><span>AI 市场位置</span><span>真实答案证据</span></div>
-          <div className="state-score"><strong>{latestByEngine.length ? percent(latestByEngine.reduce((sum, item) => sum + item.entity_sov, 0) / latestByEngine.length) : "—"}</strong><div><h2>{latestByEngine.length ? latestByEngine.some((item) => item.entity_sov > 0) ? `${dashboard.brand_name} 已进入部分 AI 答案` : `${dashboard.brand_name} 尚未进入当前 AI 答案` : "等待建立 AI 市场基线"}</h2><p>{latestByEngine.length ? `已覆盖 ${latestByEngine.length} 个真实答案面；最近一次共 ${latestVisibility?.output_summary.sample_count ?? 0} 个样本。` : dashboard.research_objective || "先定义问题集并采样真实答案，建立品牌与竞品的当前市场位置。"}</p></div></div>
-          <div className="state-metrics"><div><span>品牌提及率</span><b>{latestByEngine[0] ? percent(latestByEngine[0].entity_sov) : "—"}</b></div><div><span>自有域名引用率</span><b>{latestByEngine[0] ? percent(latestByEngine[0].citation_sov) : "—"}</b></div><div><span>正式答案面</span><b>{latestByEngine.length}</b></div></div>
-        </article>
-
-        <aside className="next-action-card"><span>{nextAction.eyebrow}</span><h2>{nextAction.title}</h2><p>{nextAction.detail}</p><Link href={nextAction.href}>{nextAction.label}<span>→</span></Link></aside>
-      </section>
-
       <section className="project-overview-recent">
         <div className="project-section-head"><div><span>最近动态</span><h2>项目刚刚发生了什么</h2></div><Link href={viewHref("activity")}>查看完整历史 →</Link></div>
-        {dashboard.activities.length ? <div className="overview-activity-list">{dashboard.activities.slice(0, 4).map((activity) => <article key={activity.id}><i className={`status-${activity.status}`} /><div><span>{ACTIVITY_LABEL[activity.kind] ?? activity.kind}</span><strong>{activity.title}</strong></div><time>{formatTime(activity.started_at)}</time></article>)}</div> : <div className="project-empty"><p>项目还没有活动。运行第一次检测后，关键变化会显示在这里。</p></div>}
+        {dashboard.activities.length ? <div className="overview-activity-list">{dashboard.activities.slice(0, 4).map((activity) => <article key={activity.id}><i className={`status-${activity.status}`} /><div><span>{ACTIVITY_LABEL[activity.kind] ?? activity.kind}</span><strong>{activity.title}</strong></div><time>{formatTime(activity.started_at)}</time></article>)}</div> : <div className="project-empty"><p>还没有测量记录。完成第一次市场位置测量后，关键变化会显示在这里。</p></div>}
       </section>
       </>}
 

@@ -171,3 +171,40 @@ a { color: inherit; }
 .report-intents > div { display: grid; grid-template-columns: repeat(4, 1fr); border-top: 1px solid var(--ink); border-left: 1px solid var(--line); }.report-intents article { min-height: 175px; padding: 18px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }.report-intents article > span { color: var(--muted); font-size: 9px; }.report-intents article > strong { display: block; margin: 23px 0 5px; font-family: var(--font-geist-mono), monospace; font-size: 34px; letter-spacing: -.06em; }.report-intents article > p { min-height: 28px; margin: 0; color: var(--muted); font-size: 8px; line-height: 1.5; }.report-intents article > div { height: 5px; margin-top: 18px; background: #e4dfd5; }.report-intents article i { display: block; height: 100%; background: var(--blue); }
 @media (max-width: 760px) { .research-report-toolbar { align-items: stretch; flex-direction: column; }.report-cover { min-height: 410px; padding: 25px 20px; }.report-cover-meta, .report-cover footer { align-items: flex-start; flex-direction: column; gap: 7px; }.report-cover h3 { font-size: 49px; }.report-executive-summary, .report-analysis-grid, .report-methodology { grid-template-columns: 1fr; }.report-executive-summary, .report-section, .report-methodology { padding: 30px 20px; }.report-scope, .report-kpis, .report-intents > div { grid-template-columns: 1fr 1fr; }.report-scope > div:nth-child(2), .report-kpis > div:nth-child(2) { border-right: 0; }.report-scope > div { border-bottom: 1px solid var(--line); }.report-kpis > div { min-height: 150px; border-bottom: 1px solid var(--line); }.report-findings > div { grid-template-columns: 1fr; }.report-findings article { min-height: 0; }.report-analysis-grid .report-section:first-child { border-right: 0; border-bottom: 1px solid var(--ink); }.report-sources article { grid-template-columns: 1fr auto; }.report-sources article > div:nth-child(2) { grid-column: 1 / -1; grid-row: 2; }.report-methodology aside { grid-column: auto; } }
 @media print { @page { margin: 14mm; }.site-header, .site-footer, .project-breadcrumb, .project-header, .project-nav, .research-report-toolbar { display: none !important; }.project-shell, .project-view, .research-report-view { width: 100%; max-width: none; margin: 0; padding: 0; }.research-report-document { border: 0; }.report-cover { min-height: 240mm; break-after: page; print-color-adjust: exact; -webkit-print-color-adjust: exact; }.report-executive-summary, .report-kpis, .report-section, .report-analysis-grid, .report-methodology { break-inside: avoid; }.report-findings article, .report-kpis > div { break-inside: avoid; } }
+
+/* Company status overview — answer "how is my brand doing?" first. */
+.project-header-actions button.project-primary-action { display: flex; gap: 24px; align-items: center; padding: 12px 16px; border: 1px solid var(--blue); background: var(--blue); color: white; cursor: pointer; font: inherit; font-size: 12px; font-weight: 700; }
+.project-header-actions button.project-primary-action:disabled { opacity: .55; cursor: not-allowed; }
+.company-status-grid .state-metrics { grid-template-columns: repeat(4, 1fr); }
+.company-ranking { margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--line); }
+.company-ranking > header { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.company-ranking > header span { color: var(--muted); font-family: var(--font-geist-mono), monospace; font-size: 9px; letter-spacing: .08em; text-transform: uppercase; }
+.company-ranking > header small { color: var(--muted); font-size: 10px; }
+.company-ranking-row { display: grid; grid-template-columns: 28px minmax(90px, .7fr) minmax(0, 1.4fr) 52px; gap: 10px; align-items: center; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 12px; }
+.company-ranking-row > b { color: var(--muted); font-family: var(--font-geist-mono), monospace; font-size: 10px; }
+.company-ranking-row.is-brand strong { color: var(--blue); }
+.company-ranking-bar { height: 6px; background: #e4dfd5; }
+.company-ranking-bar i { display: block; height: 100%; background: var(--blue); }
+.company-ranking-row.is-brand .company-ranking-bar i { background: #23734b; }
+.company-ranking-row > span { text-align: right; font-family: var(--font-geist-mono), monospace; font-size: 11px; }
+.company-status-empty { display: grid; gap: 12px; margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
+.company-status-empty p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.company-status-empty .agent-primary-button { width: fit-content; text-decoration: none; }
+.company-status-empty > a:not(.agent-primary-button) { color: var(--blue); font-size: 11px; font-weight: 700; text-decoration: none; }
+.next-action-card button { display: flex; justify-content: space-between; width: 100%; margin-top: 34px; padding: 12px 0; border: 0; border-top: 1px solid #4a4944; background: transparent; color: var(--lime); cursor: pointer; font: inherit; font-size: 12px; font-weight: 700; text-align: left; }
+.next-action-card button:disabled { opacity: .55; cursor: not-allowed; }
+.next-action-links { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 16px; }
+.next-action-links a { color: #c3c0b8; font-size: 11px; font-weight: 650; text-decoration: none; }
+.next-action-links a:hover { color: white; }
+.company-insight-strip { margin-top: 34px; }
+.company-insight-list { display: grid; grid-template-columns: repeat(3, 1fr); border-top: 1px solid var(--ink); border-left: 1px solid var(--line); }
+.company-insight-list article { min-height: 160px; padding: 18px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); background: var(--paper); }
+.company-insight-list span { color: var(--blue); font-family: var(--font-geist-mono), monospace; font-size: 9px; letter-spacing: .08em; text-transform: uppercase; }
+.company-insight-list strong { display: block; margin: 14px 0 8px; font-family: "Songti SC", STSong, serif; font-size: 20px; font-weight: 400; line-height: 1.25; }
+.company-insight-list p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
+@media (max-width: 900px) {
+  .company-status-grid .state-metrics { grid-template-columns: 1fr 1fr; }
+  .company-insight-list { grid-template-columns: 1fr; }
+  .company-ranking-row { grid-template-columns: 28px minmax(0, 1fr) 48px; }
+  .company-ranking-bar { display: none; }
+}
