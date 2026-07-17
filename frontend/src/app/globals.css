@@ -191,6 +191,13 @@ a { color: inherit; }
 .company-status-empty p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
 .company-status-empty .agent-primary-button { width: fit-content; text-decoration: none; }
 .company-status-empty > a:not(.agent-primary-button) { color: var(--blue); font-size: 11px; font-weight: 700; text-decoration: none; }
+.measure-progress { margin-top: 16px; padding: 14px 16px; border-left: 3px solid var(--blue); background: color-mix(in srgb, var(--blue) 8%, var(--paper)); }
+.measure-progress.is-running { border-left-color: var(--blue); }
+.measure-progress.is-done { border-left-color: #23734b; background: color-mix(in srgb, #23734b 8%, var(--paper)); }
+.measure-progress.is-error { border-left-color: #9b3c25; background: color-mix(in srgb, #9b3c25 8%, var(--paper)); }
+.measure-progress strong { display: block; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; }
+.measure-progress p { margin: 6px 0 0; color: var(--ink); font-size: 12px; line-height: 1.55; }
+.measure-progress small { display: block; margin-top: 8px; color: var(--muted); font-size: 10px; line-height: 1.5; }
 .next-action-card button { display: flex; justify-content: space-between; width: 100%; margin-top: 34px; padding: 12px 0; border: 0; border-top: 1px solid #4a4944; background: transparent; color: var(--lime); cursor: pointer; font: inherit; font-size: 12px; font-weight: 700; text-align: left; }
 .next-action-card button:disabled { opacity: .55; cursor: not-allowed; }
 .next-action-links { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 16px; }

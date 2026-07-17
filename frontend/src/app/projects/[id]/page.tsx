@@ -88,6 +88,37 @@ function statusHeadline(brandName: string, entityRate: number, hasData: boolean)
   if (entityRate < 0.45) return { title: `${brandName} 已有可见度，仍有提升空间`, detail: "品牌会被提到，但尚未稳定成为首选推荐。关注缺席的问题类型。" };
   return { title: `${brandName} 在当前样本中表现较强`, detail: "保持同一问题集与答案面复测，观察份额是否可复现、可维持。" };
 }
+const QUICK_INTENTS = ["branded", "category", "problem", "comparison"] as const;
+function pickQuickPrompts(items: Array<{ intent: string; text: string; selected: boolean }>) {
+  const prompts: string[] = [];
+  for (const intent of QUICK_INTENTS) {
+    const match = items.find((item) => item.intent === intent && item.selected && item.text.trim())
+      ?? items.find((item) => item.intent === intent && item.text.trim());
+    if (match) prompts.push(match.text.trim());
+  }
+  return prompts;
+}
+function pickMeasureEngines(engines: EngineInfo[]) {
+  const eligible = engines.filter((engine) => engine.report_eligible);
+  const ready = eligible.filter((engine) => engine.runtime_status === "ready");
+  return (ready.length ? ready : eligible).slice(0, 2);
+}
+function friendlyMeasureError(reason: unknown) {
+  const message = reason instanceof Error ? reason.message : "市场测量未能完成。";
+  if (/没有已验收|正式答案面|report_eligible/i.test(message)) {
+    return "当前没有可用的正式答案面。请先配置并验收千问联网或百度智能搜索，再测量。";
+  }
+  if (/Brief|研究范围|品类|竞品|研究目标/i.test(message)) {
+    return message;
+  }
+  if (/正在执行|租约/i.test(message)) {
+    return "已有测量在进行中，请稍候再试。";
+  }
+  if (/Failed to fetch|NetworkError|load failed/i.test(message)) {
+    return "无法连接后端。请确认 API 服务已启动后再试。";
+  }
+  return message;
+}
 
 export default function ProjectDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const router = useRouter();
@@ -126,6 +157,8 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
   const [factError, setFactError] = useState<string | null>(null);
   const [baselineBusy, setBaselineBusy] = useState(false);
   const [baselineError, setBaselineError] = useState<string | null>(null);
+  const [baselineStep, setBaselineStep] = useState<string | null>(null);
+  const [baselineNote, setBaselineNote] = useState<string | null>(null);
 
   useEffect(() => {
     void params.then(({ id }) => api.project(id).then(setDashboard).catch((reason: unknown) => {
@@ -277,46 +310,81 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
   async function measureCompanyStatus() {
     setBaselineBusy(true);
     setBaselineError(null);
+    setBaselineNote(null);
+    setBaselineStep("准备测量…");
     try {
       const existingPlan = dashboard?.tracking_plans.find((plan) => plan.scope_current && plan.status === "active");
       if (existingPlan) {
-        await api.runTrackingPlan(dashboardId, existingPlan.id);
+        const estimate = existingPlan.question_count * existingPlan.engine_ids.length * existingPlan.samples;
+        setBaselineStep(`按既有计划复测（约 ${estimate} 个答案样本）…`);
+        const execution = await api.runTrackingPlan(dashboardId, existingPlan.id);
+        setBaselineStep("刷新项目状态…");
         await refreshProject();
+        if (execution.status === "failed") {
+          const detail = Object.entries(execution.errors).map(([engine, error]) => `${engine}: ${error}`).join("；");
+          throw new Error(detail || "测量失败：所有答案面都没有返回正式结果。");
+        }
+        if (execution.status === "partial") {
+          const detail = Object.entries(execution.errors).map(([engine, error]) => `${engine}: ${error}`).join("；");
+          setBaselineNote(detail ? `部分答案面失败：${detail}` : "部分答案面失败，已保存可用结果。");
+        } else {
+          setBaselineNote("测量完成。下方已更新品牌提及、竞品排名与证据。");
+        }
         return;
       }
       if (!dashboard?.brief_ready) {
         throw new Error("请先补齐研究 Brief（品牌、市场、品类、竞品、研究目标），再测量市场位置。");
       }
-      const engines = availableEngines.length
-        ? availableEngines
-        : (await api.engines()).filter((engine) => engine.report_eligible);
+      setBaselineStep("检查可用答案面…");
+      const engines = pickMeasureEngines(
+        availableEngines.length ? availableEngines : await api.engines(),
+      );
       if (!engines.length) {
         throw new Error("当前没有已验收的正式答案面。请先配置并验收 Provider（如千问联网、百度智能搜索）。");
       }
+      setBaselineStep("生成快速问题集（每类意图 1 题）…");
       let promptSetId = dashboard.prompt_sets.find((item) => item.active && item.scope_current)?.id;
+      let questionCount = dashboard.prompt_sets.find((item) => item.id === promptSetId)?.prompts.length ?? 0;
       if (!promptSetId) {
         const framework = await api.questionFramework(dashboardId);
-        const prompts = framework.items.filter((item) => item.selected).map((item) => item.text.trim()).filter(Boolean);
+        const prompts = pickQuickPrompts(framework.items);
         if (!prompts.length) throw new Error("问题框架为空。请完善品类与竞品后再试。");
         const promptSet = await api.createPromptSet(dashboardId, {
-          name: `企业研究基线 ${new Date().toLocaleDateString("zh-CN")}`,
+          name: `快速市场基线 ${new Date().toLocaleDateString("zh-CN")}`,
           prompts,
           kind: "tracking",
         });
         promptSetId = promptSet.id;
+        questionCount = prompts.length;
       }
+      const samples = 2;
+      const estimate = questionCount * engines.length * samples;
+      setBaselineStep(`建立追踪计划并采样（${engines.map((item) => item.display_name).join("、")} · 约 ${estimate} 个样本）…`);
       const plan = await api.createTrackingPlan(dashboardId, {
         prompt_set_id: promptSetId,
         engine_ids: engines.map((engine) => engine.id),
-        samples: 3,
+        samples,
         cadence: "weekly",
       });
-      await api.runTrackingPlan(dashboardId, plan.id);
+      const execution = await api.runTrackingPlan(dashboardId, plan.id);
+      setBaselineStep("刷新项目状态…");
       await refreshProject();
+      if (execution.status === "failed") {
+        const detail = Object.entries(execution.errors).map(([engine, error]) => `${engine}: ${error}`).join("；");
+        throw new Error(detail || "测量失败：所有答案面都没有返回正式结果。");
+      }
+      if (execution.status === "partial") {
+        const detail = Object.entries(execution.errors).map(([engine, error]) => `${engine}: ${error}`).join("；");
+        setBaselineNote(detail ? `部分答案面失败：${detail}` : "部分答案面失败，已保存可用结果。");
+      } else {
+        setBaselineNote(`测量完成：${questionCount} 个问题 × ${engines.length} 个答案面。可继续查看证据或研究报告。`);
+      }
     } catch (reason) {
-      setBaselineError(reason instanceof Error ? reason.message : "市场测量未能完成。");
+      setBaselineError(friendlyMeasureError(reason));
+      setBaselineNote(null);
     } finally {
       setBaselineBusy(false);
+      setBaselineStep(null);
     }
   }
 
@@ -505,7 +573,7 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
           {!hasVisibility && (
             <div className="company-status-empty">
               <p>{briefComplete
-                ? "研究范围已就绪。点击一键测量，系统会用企业问题框架在已验收答案面上采样。"
+                ? "研究范围已就绪。一键测量会取 4 类意图各 1 题、每题 2 次采样，优先使用最近跑通的正式答案面，通常几分钟内出结果。"
                 : "还缺研究范围。先补齐品类、竞品和研究目标，否则测到的答案可能偏题。"}</p>
               {briefComplete ? (
                 <button type="button" className="agent-primary-button" onClick={() => void measureCompanyStatus()} disabled={baselineBusy || !canMeasureNow}>
@@ -514,10 +582,20 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
               ) : (
                 <a className="agent-primary-button" href="#research-brief">去完善研究范围</a>
               )}
-              <Link href={trackHref}>或手动设计问题与答案面 →</Link>
+              <Link href={trackHref}>或手动设计完整问题集 →</Link>
             </div>
           )}
-          {baselineError && <p className="cycle-action-error" role="alert">{baselineError}</p>}
+          {(baselineBusy || baselineStep || baselineNote || baselineError) && (
+            <div className={`measure-progress${baselineError ? " is-error" : baselineBusy ? " is-running" : " is-done"}`} role="status">
+              {baselineBusy && <strong>测量进行中</strong>}
+              {!baselineBusy && baselineError && <strong>测量未完成</strong>}
+              {!baselineBusy && !baselineError && baselineNote && <strong>测量结果</strong>}
+              {baselineStep && <p>{baselineStep}</p>}
+              {baselineNote && !baselineBusy && <p>{baselineNote}</p>}
+              {baselineError && <p role="alert">{baselineError}</p>}
+              {baselineBusy && <small>真实答案采样需要联网调用；请保持页面打开，不要重复点击。</small>}
+            </div>
+          )}
         </article>
 
         <aside className="next-action-card">
